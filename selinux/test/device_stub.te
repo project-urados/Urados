@@ -1,0 +1,13 @@
+# TEST ONLY. Stands in for device-specific types seen in urados.log
+# (urados_root_dir_t labels "/", urados_parent_dir_t labels "/urados").
+# On the device these come from the device base policy, not from this module.
+policy_module(urados_device_stub, 1.0)
+
+gen_require(`
+    attribute file_type;
+')
+
+type urados_root_dir_t;
+type urados_parent_dir_t;
+typeattribute urados_root_dir_t file_type;
+typeattribute urados_parent_dir_t file_type;

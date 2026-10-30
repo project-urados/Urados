@@ -1,0 +1,12 @@
+# File contexts for Urados confinement.
+# Apply with: setfiles -F /etc/selinux/<policy>/contexts/files/file_contexts /
+# Note: these are regexes matched against absolute paths.
+
+/data/app(/.*)?              system_u:object_r:urados_app_data_t:s0
+/urados/bin/user(/.*)?       system_u:object_r:urados_bin_user_t:s0
+/user/app_prog(/.*)?         system_u:object_r:urados_app_prog_t:s0
+
+# Traversal-only directories on the path to the above.
+/data                        system_u:object_r:urados_path_dir_t:s0
+/user                        system_u:object_r:urados_path_dir_t:s0
+/urados/bin                  system_u:object_r:urados_path_dir_t:s0
