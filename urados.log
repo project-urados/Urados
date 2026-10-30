@@ -167,4 +167,14 @@ bash-5.3# adduser -G super_users -S -H -u 0 -D root
 [  533.742750] audit: type=1400 audit(1793386358.768:1475): avc:  denied  { write } for  pid=144 comm="addgroup" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
 [  533.776778] audit: type=1400 audit(1793386358.803:1476): avc:  denied  { write } for  pid=144 comm="addgroup" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
 [  533.784531] audit: type=1400 audit(1793386358.803:1477): avc:  denied  { write } for  pid=144 comm="addgroup" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+bash-5.3# ls /data 
+data.tar  fsverity-test  lost+found  system  user
+bash-5.3# ls /data/user
+[ 1085.887401] audit: type=1400 audit(1793386910.916:1478): avc:  denied  { read } for  pid=146 comm="ls" name="user" dev="sda3" ino=131076 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[ 1085.889303] audit: type=1400 audit(1793386910.919:1479): avc:  denied  { open } for  pid=146 comm="ls" path="/data/user" dev="sda3" ino=131076 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+app  test
+bash-5.3#  ls /data/user/app
+test.app
+bash-5.3# ls /data/user/app/test.app
+test
 bash-5.3#
