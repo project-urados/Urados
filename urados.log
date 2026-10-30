@@ -1,0 +1,170 @@
+[   11.521461] Run /init as init process
+Early system init...
+[   12.590162] random: crng init done
+[   12.676794] EXT4-fs (sda5): recovery complete
+[   12.688907] EXT4-fs (sda5): mounted filesystem 800c9574-b70e-4c52-a45b-eab7193151f5 r/w with ordered data mode. Quota mode: none.
+[   12.732552] mount (107) used greatest stack depth: 12920 bytes left
+[   12.968916] EXT4-fs (sda4): recovery complete
+[   12.970812] EXT4-fs (sda4): mounted filesystem 0b015600-94d9-4925-9ea7-a1eda02a4ed3 r/w with ordered data mode. Quota mode: none.
+[   12.974683] mount (110) used greatest stack depth: 12864 bytes left
+[   13.519430] EXT4-fs (sda3): recovery complete
+[   13.533240] EXT4-fs (sda3): mounted filesystem bd3eef96-98a5-46e3-a027-08a3e2c767a3 r/w with ordered data mode. Quota mode: none.
+Done!
+grep: /proc/mounts: No such file or directory
+Loading SELinux policy version 35...
+[   14.318588] SELinux:  policy capability network_peer_controls=0
+[   14.321224] SELinux:  policy capability open_perms=1
+[   14.321738] SELinux:  policy capability extended_socket_class=0
+[   14.321925] SELinux:  policy capability always_check_network=0
+[   14.322079] SELinux:  policy capability cgroup_seclabel=0
+[   14.324011] SELinux:  policy capability nnp_nosuid_transition=0
+[   14.325429] SELinux:  policy capability genfs_seclabel_symlinks=0
+[   14.325676] SELinux:  policy capability ioctl_skip_cloexec=0
+[   14.325826] SELinux:  policy capability userspace_initial_context=0
+[   14.325984] SELinux:  policy capability netlink_xperm=0
+[   14.326125] SELinux:  policy capability netif_wildcard=0
+[   14.326267] SELinux:  policy capability genfs_seclabel_wildcard=0
+[   14.326423] SELinux:  policy capability functionfs_seclabel=0
+[   14.326604] SELinux:  policy capability memfd_class=0
+[   14.326737] SELinux:  policy capability bpf_token_perms=0
+[   14.380323] audit: type=1403 audit(1793385839.404:2): auid=4294967295 ses=4294967295 lsm=selinux res=1
+[   14.412087] audit: type=1400 audit(1793385839.436:3): avc:  denied  { use } for  pid=1 comm="init" path="/dev/console" dev="rootfs" ino=76 ioctlcmd=0x5413 scontext=system_u:system_r:kernel_t:s0 tcontext=system_u:system_r:kernel_t:s0 tclass=fd permissive=1
+[   14.433363] audit: type=1400 audit(1793385839.437:4): avc:  denied  { ioctl } for  pid=1 comm="init" path="/dev/console" dev="rootfs" ino=76 ioctlcmd=0x5413 scontext=system_u:system_r:kernel_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=chr_file permissive=1
+[   14.442657] audit: type=1400 audit(1793385839.470:5): avc:  denied  { read } for  pid=1 comm="init" path="/init_sys/init" dev="sda5" ino=13 scontext=system_u:system_r:kernel_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=file permissive=1
+[   14.450885] audit: type=1400 audit(1793385839.470:6): avc:  denied  { search } for  pid=1 comm="init" name="/" dev="sda2" ino=2 scontext=system_u:system_r:kernel_t:s0 tcontext=system_u:object_r:urados_root_dir_t:s0 tclass=dir permissive=1
+[   14.467664] audit: type=1400 audit(1793385839.470:7): avc:  denied  { read } for  pid=1 comm="init" name="sbin" dev="sda2" ino=13 scontext=system_u:system_r:kernel_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=lnk_file permissive=1
+[   14.469129] audit: type=1400 audit(1793385839.490:8): avc:  denied  { search } for  pid=1 comm="init" name="/" dev="sda2" ino=2 scontext=system_u:system_r:kernel_t:s0 tcontext=system_u:object_r:urados_root_dir_t:s0 tclass=dir permissive=1
+[   14.472436] audit: type=1400 audit(1793385839.490:9): avc:  denied  { search } for  pid=1 comm="init" name="urados" dev="sda2" ino=15 scontext=system_u:system_r:kernel_t:s0 tcontext=system_u:object_r:urados_parent_dir_t:s0 tclass=dir permissive=1
+[   14.472939] audit: type=1400 audit(1793385839.490:10): avc:  denied  { search } for  pid=1 comm="init" name="sbin" dev="sda2" ino=16 scontext=system_u:system_r:kernel_t:s0 tcontext=system_u:object_r:system_sbin_dir_t:s0 tclass=dir permissive=1
+[   14.473376] audit: type=1400 audit(1793385839.490:11): avc:  denied  { execute } for  pid=1 comm="init" name="setfiles" dev="sda2" ino=3803 scontext=system_u:system_r:kernel_t:s0 tcontext=system_u:object_r:system_bin_exec_t:s0 tclass=file permissive=1
+Loading SELinux file contexts...
+Loading Urados...
+Mounting partitions...
+Done!
+Handing over execution to 'runit-init' init system...
+Dev note: !Dev notes in /data!
+- runit: $Id: c66c1e3b98d1b630bd51b1d56aaed5c2994e8c9d $: booting.
+- runit: enter stage: /data/system/etc/runit/1
+Initalizing hardware...
+Firmware loaded.
+Drivers loaded.
+Done!
+[   17.957338] 1 (125) used greatest stack depth: 12704 bytes left
+- runit: leave stage: /data/system/etc/runit/1
+- runit: enter stage: /data/system/etc/runit/2
+bash: cannot set terminal process group (-1): Inappropriate ioctl for device
+bash: no job control in this shell
+bash-5.3# ls urados
+[   71.477141] kauditd_printk_skb: 1404 callbacks suppressed
+[   71.486128] audit: type=1400 audit(1793385896.506:1416): avc:  denied  { getattr } for  pid=127 comm="ls" name="/" dev="selinuxfs" ino=1 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:system_selinuxfs_t:s0 tclass=filesystem permissive=1
+bin        etc      lib    libexec  share     usr
+dev-tools  include  lib64  sbin     tmp_data  var
+bash-5.3# ls /
+bin   data  etc   init_sys  lib    lost+found  run   sys  urados       usr
+boot  dev   init  keys      lib64  proc        sbin  tmp  urados_init  zram
+bash-5.3# ls /init_sys
+[  115.100787] audit: type=1400 audit(1793385940.130:1417): avc:  denied  { read } for  pid=129 comm="ls" name="/" dev="sda5" ino=2 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  115.102575] audit: type=1400 audit(1793385940.130:1418): avc:  denied  { read open } for  pid=129 comm="ls" path="/init_sys" dev="sda5" ino=2 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+init  lost+found
+bash-5.3# adduser
+BusyBox v1.39.0.git (2026-09-20 15:56:46 EDT) multi-call binary.
+
+Usage: adduser [OPTIONS] USER [GROUP]
+
+Create new user, or add USER to GROUP
+
+        -h DIR          Home directory
+        -g GECOS        GECOS field
+        -s SHELL        Login shell
+        -G GRP          Group
+        -S              Create a system user
+        -D              Don't assign a password
+        -H              Don't create home directory
+        -u UID          User id
+        -k SKEL         Skeleton directory (/etc/skel)
+bash-5.3# addgroup   
+BusyBox v1.39.0.git (2026-10-20 10:41:46 EDT) multi-call binary.
+
+Usage: addgroup [-g GID] [-S] [USER] GROUP
+
+Add a group or add a user to a group
+
+        -g GID  Group id
+        -S      Create a system group
+bash-5.3# addgroup super_users
+[  273.894402] audit: type=1400 audit(1793386098.917:1419): avc:  denied  { write } for  pid=132 comm="addgroup" name="group" dev="sda3" ino=266430 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=file permissive=1
+[  273.910366] audit: type=1400 audit(1793386098.924:1420): avc:  denied  { write } for  pid=132 comm="addgroup" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  273.912191] audit: type=1400 audit(1793386098.924:1421): avc:  denied  { add_name } for  pid=132 comm="addgroup" name="group+" scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  273.919027] audit: type=1400 audit(1793386098.924:1422): avc:  denied  { create } for  pid=132 comm="addgroup" name="group+" scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=file permissive=1
+[  273.919549] audit: type=1400 audit(1793386098.924:1423): avc:  denied  { associate } for  pid=132 comm="addgroup" name="group+" scontext=system_u:object_r:unlabeled_t:s0 tcontext=system_u:object_r:filesystem_t:s0 tclass=filesystem permissive=1
+[  273.951492] audit: type=1400 audit(1793386098.978:1424): avc:  denied  { write } for  pid=132 comm="addgroup" path="/data/system/etc/group+" dev="sda3" ino=266429 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=file permissive=1
+[  273.957141] audit: type=1400 audit(1793386098.984:1425): avc:  denied  { setattr } for  pid=132 comm="addgroup" name="group+" dev="sda3" ino=266429 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=file permissive=1
+[  273.968951] audit: type=1400 audit(1793386098.990:1426): avc:  denied  { write } for  pid=132 comm="addgroup" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  273.971251] audit: type=1400 audit(1793386098.990:1427): avc:  denied  { remove_name } for  pid=132 comm="addgroup" name="group-" dev="sda3" ino=266432 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  273.973136] audit: type=1400 audit(1793386098.990:1428): avc:  denied  { unlink } for  pid=132 comm="addgroup" name="group-" dev="sda3" ino=266432 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=file permissive=1
+bash-5.3# adduser -G super_users -S -H -u 0 root
+[  377.690372] kauditd_printk_skb: 6 callbacks suppressed
+[  377.690508] audit: type=1400 audit(1793386202.719:1435): avc:  denied  { write } for  pid=133 comm="adduser" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  377.726671] audit: type=1400 audit(1793386202.748:1436): avc:  denied  { write } for  pid=133 comm="adduser" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  377.727583] audit: type=1400 audit(1793386202.749:1437): avc:  denied  { write } for  pid=133 comm="adduser" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  377.760048] audit: type=1400 audit(1793386202.785:1438): avc:  denied  { write } for  pid=133 comm="adduser" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  377.767737] audit: type=1400 audit(1793386202.785:1439): avc:  denied  { write } for  pid=133 comm="adduser" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  377.826434] audit: type=1400 audit(1793386202.852:1440): avc:  denied  { write } for  pid=134 comm="addgroup" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  377.832540] audit: type=1400 audit(1793386202.862:1441): avc:  denied  { write } for  pid=134 comm="addgroup" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  377.842930] audit: type=1400 audit(1793386202.868:1442): avc:  denied  { write } for  pid=134 comm="addgroup" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  377.844746] audit: type=1400 audit(1793386202.868:1443): avc:  denied  { link } for  pid=134 comm="addgroup" name="group" dev="sda3" ino=266429 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=file permissive=1
+[  377.853662] audit: type=1400 audit(1793386202.868:1444): avc:  denied  { lock } for  pid=134 comm="addgroup" path="/data/system/etc/group" dev="sda3" ino=266429 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=file permissive=1
+bash-5.3# modgroup
+bash: modgroup: command not found
+bash-5.3# groupmod
+bash: groupmod: command not found
+bash-5.3# delgroup
+BusyBox v1.39.0.git (2026-10-20 10:41:46 EDT) multi-call binary.
+
+Usage: delgroup [USER] GROUP
+
+Delete group GROUP from the system or user USER from group GROUP
+bash-5.3# delgroup super_users
+delgroup: 'root' still has 'super_users' as their primary group!
+bash-5.3# deluser
+BusyBox v1.39.0.git (2026-10-20 10:41:46 EDT) multi-call binary.
+
+Usage: deluser [--remove-home] USER
+
+Delete USER from the system
+bash-5.3# deluser root
+[  452.725083] kauditd_printk_skb: 3 callbacks suppressed
+[  452.725168] audit: type=1400 audit(1793386277.754:1448): avc:  denied  { write } for  pid=140 comm="deluser" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  452.731304] audit: type=1400 audit(1793386277.760:1449): avc:  denied  { write } for  pid=140 comm="deluser" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  452.736316] audit: type=1400 audit(1793386277.763:1450): avc:  denied  { write } for  pid=140 comm="deluser" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  452.764127] audit: type=1400 audit(1793386277.793:1451): avc:  denied  { write } for  pid=140 comm="deluser" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  452.773249] audit: type=1400 audit(1793386277.793:1452): avc:  denied  { write } for  pid=140 comm="deluser" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  452.774969] audit: type=1400 audit(1793386277.796:1453): avc:  denied  { write } for  pid=140 comm="deluser" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  452.775614] audit: type=1400 audit(1793386277.796:1454): avc:  denied  { write } for  pid=140 comm="deluser" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  452.777560] audit: type=1400 audit(1793386277.796:1455): avc:  denied  { write } for  pid=140 comm="deluser" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  452.798845] audit: type=1400 audit(1793386277.828:1456): avc:  denied  { write } for  pid=140 comm="deluser" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  452.807610] audit: type=1400 audit(1793386277.828:1457): avc:  denied  { write } for  pid=140 comm="deluser" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+bash-5.3# delgroup super_users
+[  460.064682] audit: type=1400 audit(1793386285.090:1458): avc:  denied  { write } for  pid=141 comm="delgroup" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  460.072136] audit: type=1400 audit(1793386285.094:1459): avc:  denied  { write } for  pid=141 comm="delgroup" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  460.083072] audit: type=1400 audit(1793386285.111:1460): avc:  denied  { write } for  pid=141 comm="delgroup" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  460.171283] audit: type=1400 audit(1793386285.200:1461): avc:  denied  { write } for  pid=141 comm="delgroup" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  460.171953] audit: type=1400 audit(1793386285.200:1462): avc:  denied  { write } for  pid=141 comm="delgroup" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+bash-5.3# addgroup -S -g 0 super_users 
+[  484.062211] audit: type=1400 audit(1793386309.091:1463): avc:  denied  { write } for  pid=142 comm="addgroup" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  484.068161] audit: type=1400 audit(1793386309.097:1464): avc:  denied  { write } for  pid=142 comm="addgroup" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  484.077240] audit: type=1400 audit(1793386309.098:1465): avc:  denied  { write } for  pid=142 comm="addgroup" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  484.119600] audit: type=1400 audit(1793386309.147:1466): avc:  denied  { write } for  pid=142 comm="addgroup" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  484.143956] audit: type=1400 audit(1793386309.147:1467): avc:  denied  { write } for  pid=142 comm="addgroup" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+bash-5.3# adduser -G super_users -S -H -u 0 -D root
+[  533.627739] audit: type=1400 audit(1793386358.656:1468): avc:  denied  { write } for  pid=143 comm="adduser" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  533.632944] audit: type=1400 audit(1793386358.656:1469): avc:  denied  { write } for  pid=143 comm="adduser" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  533.638546] audit: type=1400 audit(1793386358.666:1470): avc:  denied  { write } for  pid=143 comm="adduser" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  533.680768] audit: type=1400 audit(1793386358.705:1471): avc:  denied  { write } for  pid=143 comm="adduser" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  533.684402] audit: type=1400 audit(1793386358.706:1472): avc:  denied  { write } for  pid=143 comm="adduser" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  533.725041] audit: type=1400 audit(1793386358.753:1473): avc:  denied  { write } for  pid=144 comm="addgroup" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  533.741282] audit: type=1400 audit(1793386358.765:1474): avc:  denied  { write } for  pid=144 comm="addgroup" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  533.742750] audit: type=1400 audit(1793386358.768:1475): avc:  denied  { write } for  pid=144 comm="addgroup" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  533.776778] audit: type=1400 audit(1793386358.803:1476): avc:  denied  { write } for  pid=144 comm="addgroup" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+[  533.784531] audit: type=1400 audit(1793386358.803:1477): avc:  denied  { write } for  pid=144 comm="addgroup" name="etc" dev="sda3" ino=262146 scontext=system_u:system_r:runit_t:s0 tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1
+bash-5.3#
