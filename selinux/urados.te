@@ -1,0 +1,163 @@
+policy_module(urados, 1.0)
+
+# Urados confinement policy
+#
+# Requirements implemented here:
+#  1. root (urados_root_t) can access every file type EXCEPT urados_app_data_t
+#     (/data/app), and cannot switch itself into the app-owner domain or
+#     disable enforcement.
+#  2. Members of Linux group 'users' (SELinux user urados_user_u, domain
+#     urados_user_t) may only EXECUTE programs in /urados/bin/user and
+#     /user/app_prog. They get no other file access and no process control.
+#  3. The owner of /data/app (SELinux user urados_app_u, domain urados_app_t)
+#     has full access to /data/app and may execute anything in the two user
+#     dictionaries.
+#  4. Every other domain keeps unrestricted access, except that nothing outside
+#     the owner can read or write /data/app.
+#
+# Labels are assigned in urados.fc. SELinux users are declared in
+# base/users.conf (base policy only). Login mapping (Linux user/group ->
+# SELinux user) is not part of this module:
+#   semanage login -a -s urados_root_u root
+#   semanage login -a -s urados_user_u %users
+#   semanage login -a -s urados_app_u  <owner-of-/data/app>
+# Domain entry points (how a process becomes urados_user_t / urados_app_t) are
+# also NOT defined yet; see the PR description.
+#
+# Known limitation: shared libraries are labelled lib_t by the base policy.
+# urados_user_t needs read+execute(-map) on them to start any program, so it
+# is granted on lib_t. This permits loading libraries, not running arbitrary
+# programs, but it is broader than "only the two dictionaries".
+
+require {
+    attribute file_type;
+    attribute domain;
+    attribute unconfined_domain_type;
+    type security_t;
+    type lib_t;
+    type urados_root_dir_t;
+    type urados_parent_dir_t;
+    class file { ioctl read write create getattr setattr lock append unlink link rename execute execute_no_trans entrypoint open map };
+    class dir { ioctl read write create getattr setattr lock append unlink link rename add_name remove_name reparent search rmdir open };
+    class lnk_file { read write create getattr setattr lock append unlink link rename open };
+    class process { fork transition dyntransition setcurrent setexec ptrace sigchld sigkill sigstop signull signal getsched setsched getpgid setpgid getsession getcap setcap getattr setrlimit share };
+    class security { load_policy setenforce setbool setsecparam setcheckreqprot };
+}
+
+########################################
+# Types
+########################################
+
+# Process domains
+type urados_root_t;     # root
+type urados_user_t;     # group 'users'
+type urados_app_t;      # owner of /data/app
+
+# File types
+type urados_bin_user_t;   # /urados/bin/user(/.*)?
+type urados_app_prog_t;   # /user/app_prog(/.*)?
+type urados_app_data_t;   # /data/app(/.*)?  -- NOT a file_type on purpose
+type urados_path_dir_t;   # /data, /user, /urados/bin  (traversal only)
+
+typeattribute urados_root_t domain;
+typeattribute urados_root_t unconfined_domain_type;
+
+typeattribute urados_bin_user_t file_type;
+typeattribute urados_app_prog_t file_type;
+typeattribute urados_path_dir_t file_type;
+
+
+########################################
+# SELinux users and roles
+########################################
+
+role urados_root_r;
+role urados_user_r;
+role urados_app_r;
+role urados_root_r types urados_root_t;
+role urados_user_r types urados_user_t;
+role urados_app_r types urados_app_t;
+
+# SELinux users (urados_root_u, urados_user_u, urados_app_u) cannot be declared
+# in a loadable module; they go in the base policy. See selinux/base/users.conf.
+
+########################################
+# Unrestricted domains: every 'domain' except the two restricted ones
+########################################
+
+# "Any program except" the restricted ones can do anything. urados_user_t and
+# urados_app_t are deliberately NOT 'domain' types, so base-policy blanket grants
+# to 'domain' never reach them; everything else (root, runit, daemons) is 'domain'
+# and keeps the blanket grant below.
+#
+# Files: every file_type. urados_app_data_t is not a file_type, so this grant
+# never reaches /data/app.
+allow unconfined_domain_type file_type:file { ioctl read write create getattr setattr lock append unlink link rename execute execute_no_trans entrypoint open map };
+allow unconfined_domain_type file_type:dir { ioctl read write create getattr setattr lock append unlink link rename add_name remove_name reparent search rmdir open };
+allow unconfined_domain_type file_type:lnk_file { read write create getattr setattr lock append unlink link rename open };
+
+# Processes: may fork/signal/etc. and transition into any domain EXCEPT
+# urados_app_t and urados_user_t. Excluding urados_app_t is what stops root from
+# running `runcon` into the app-owner domain. No ptrace, no setcurrent/dyntransition.
+allow unconfined_domain_type { domain -urados_app_t }:process { fork transition sigchld sigkill sigstop signull signal getsched setsched getpgid setpgid getsession getcap setcap getattr setrlimit share setexec };
+
+########################################
+# Owner of /data/app
+########################################
+
+allow urados_app_t urados_app_data_t:dir { ioctl read write create getattr setattr lock append unlink link rename add_name remove_name reparent search rmdir open };
+allow urados_app_t urados_app_data_t:file { ioctl read write create getattr setattr lock append unlink link rename execute open map };
+allow urados_app_t urados_app_data_t:lnk_file { read write create getattr setattr lock append unlink link rename open };
+
+# Execute anything in the two user dictionaries (no domain change).
+allow urados_app_t { urados_bin_user_t urados_app_prog_t }:file { getattr open read map execute execute_no_trans };
+allow urados_app_t { urados_bin_user_t urados_app_prog_t }:dir { search getattr open read };
+
+# Traversal to those dictionaries, and shared libraries to run them.
+allow urados_app_t { urados_path_dir_t urados_root_dir_t urados_parent_dir_t }:dir { search getattr };
+allow urados_app_t lib_t:dir { search getattr };
+allow urados_app_t lib_t:file { getattr open read map execute };
+
+allow urados_app_t self:process { fork sigchld };
+
+########################################
+# Members of group 'users'
+########################################
+
+allow urados_user_t { urados_bin_user_t urados_app_prog_t }:file { getattr open read map execute execute_no_trans };
+allow urados_user_t { urados_bin_user_t urados_app_prog_t }:dir { search getattr };
+allow urados_user_t { urados_path_dir_t urados_root_dir_t urados_parent_dir_t }:dir { search getattr };
+allow urados_user_t lib_t:dir { search getattr };
+allow urados_user_t lib_t:file { getattr open read map execute };
+
+allow urados_user_t self:process { fork sigchld };
+
+########################################
+# Neverallow guarantees (enforced by checkpolicy at build time)
+########################################
+
+# (a) Nobody except the owner touches /data/app contents.
+neverallow { domain -urados_app_t } urados_app_data_t:file { open read write append execute map create unlink link rename };
+neverallow { domain -urados_app_t } urados_app_data_t:dir { read write add_name remove_name create search open };
+neverallow { domain -urados_app_t } urados_app_data_t:lnk_file { read write create unlink link rename };
+
+# (b) Nobody can enter the owner's domain except the owner's own login
+#     (login domains are granted this by the base login policy, not here).
+neverallow { urados_root_t urados_user_t } urados_app_t:process { transition dyntransition setexec setcurrent ptrace };
+
+# (c) Nothing can debug the owner's processes (memory would expose app data).
+neverallow { domain -urados_app_t } urados_app_t:process ptrace;
+
+# (d) Root cannot change its own confinement or the policy.
+neverallow urados_root_t security_t:security { load_policy setenforce setbool setsecparam setcheckreqprot };
+neverallow urados_root_t urados_app_data_t:{ file dir lnk_file } *;
+
+# (e) Group 'users': only read/execute in the two dictionaries, traversal, and
+#     the libraries needed to run them. No writes, no other types, no
+#     symlinks, no process control beyond fork/sigchld.
+neverallow urados_user_t { file_type -urados_bin_user_t -urados_app_prog_t }:file ~{ getattr open read map execute };
+neverallow urados_user_t { file_type -urados_bin_user_t -urados_app_prog_t -urados_path_dir_t -urados_root_dir_t -urados_parent_dir_t }:dir ~{ getattr search };
+neverallow urados_user_t { file_type -urados_bin_user_t -urados_app_prog_t -urados_path_dir_t -urados_root_dir_t -urados_parent_dir_t }:lnk_file *;
+neverallow urados_user_t urados_app_data_t:{ file dir lnk_file } *;
+neverallow urados_user_t { domain -urados_user_t }:process ~{ sigchld };
+neverallow urados_user_t domain:process { transition dyntransition setexec setcurrent ptrace };
