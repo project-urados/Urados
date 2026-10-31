@@ -1,0 +1,490 @@
+#!/usr/bin/env python3
+"""pkg_mgr - minimal package installer for Urados.
+
+Usage:
+    pkg_mgr install PACKAGE_DIR [--root DIR] [--dry-run] [--force]
+
+PACKAGE_DIR may be any directory (absolute or relative) that contains a
+manifest.ini at its top level. Every [Files] entry is copied from
+PACKAGE_DIR/<Source> to <root><Installation.Prefix>/<Destination>.
+
+Options:
+    --root DIR   Install under DIR instead of /. Must be absolute. Used for
+                 staging and tests. The manifest Prefix is still validated
+                 exactly as it would be for a real install.
+    --dry-run    Validate and print the plan. Writes nothing.
+    --force      Replace files that already exist at a destination.
+
+Safety rules (all checked before anything is written):
+    - Prefix must be a normalized absolute path under /urados/apps/.
+    - Source and Destination must be relative, must not contain '..', and
+      must not be symlinks. Sources must be regular files in PACKAGE_DIR.
+    - Destinations stay under the Prefix. No existing component of the
+      install path may be a symlink.
+    - Destinations may not repeat, may not use the reserved '.pkg/' name,
+      and may not be used as a file and a directory at the same time.
+    - Unknown keys in [Application], [Installation] and [Execution] are
+      errors, so a typo is never silently ignored.
+
+Modes: files under bin/ or scripts/, and the Execution Executable, are
+installed 0755. Everything else is 0644.
+
+Execution settings (Executable, WorkingDirectory, Arguments, RunAs) are
+recorded in <Prefix>/.pkg/manifest.ini. pkg_mgr never runs the application.
+
+Exit codes: 0 success, 1 invalid package or request, 2 write failed and was
+rolled back.
+"""
+
+import argparse
+import configparser
+import os
+import posixpath
+import re
+import shutil
+import stat
+import sys
+from dataclasses import dataclass, field
+
+APPS_BASE = "/urados/apps"
+META_DIR = ".pkg"
+MANIFEST_NAME = "manifest.ini"
+ALLOWED_TYPES = ("executable", "library")
+EXEC_MODE = 0o755
+DATA_MODE = 0o644
+
+REQUIRED_SECTIONS = ("Application", "Installation", "Files")
+KNOWN_KEYS = {
+    "Application": {"Name", "ID", "Version", "Description", "Type"},
+    "Installation": {"Prefix"},
+    "Execution": {"Executable", "WorkingDirectory", "Arguments", "RunAs"},
+}
+
+ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+~-]*$")
+USER_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+FILE_KEY_RE = re.compile(r"^File([0-9]+)\.(Source|Destination)$")
+
+
+class PkgError(Exception):
+    """Invalid package or request. Nothing has been written."""
+
+
+class InstallError(Exception):
+    """A write failed. Changes made so far were rolled back."""
+
+
+@dataclass
+class FileEntry:
+    index: int
+    source: str
+    destination: str
+
+
+@dataclass
+class Manifest:
+    name: str
+    app_id: str
+    version: str
+    description: str
+    app_type: str
+    prefix: str
+    files: list
+    executable: str = ""
+    working_directory: str = "."
+    arguments: str = ""
+    run_as: str = ""
+
+
+@dataclass
+class Op:
+    """One file to write: copy from `src`, or write `content`."""
+    dst: str
+    mode: int
+    src: str = None
+    content: bytes = None
+
+
+@dataclass
+class Plan:
+    manifest: Manifest
+    install_dir: str
+    dirs: list = field(default_factory=list)   # outermost first
+    ops: list = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Manifest parsing and validation
+# ---------------------------------------------------------------------------
+
+def _relpath(value, what):
+    """Validate a package-relative path and return it normalized."""
+    if not value:
+        raise PkgError(f"{what} is empty")
+    if "\0" in value:
+        raise PkgError(f"{what} contains a NUL byte")
+    if value.startswith("/"):
+        raise PkgError(f"{what} must be relative, got {value!r}")
+    parts = [p for p in value.split("/") if p not in ("", ".")]
+    if ".." in parts:
+        raise PkgError(f"{what} must not contain '..': {value!r}")
+    if not parts:
+        raise PkgError(f"{what} does not name a file: {value!r}")
+    return "/".join(parts)
+
+
+def _prefix(value):
+    if not value.startswith("/"):
+        raise PkgError(f"[Installation] Prefix must be absolute, got {value!r}")
+    if posixpath.normpath(value) != value:
+        raise PkgError(
+            "[Installation] Prefix must be normalized "
+            f"(no '..', '//', '.', or trailing '/'): {value!r}")
+    if not value.startswith(APPS_BASE + "/"):
+        raise PkgError(f"[Installation] Prefix must be under {APPS_BASE}/: {value!r}")
+    return value
+
+
+def _section(cp, name):
+    """Return a section's values, rejecting unknown keys."""
+    if not cp.has_section(name):
+        return {}
+    values = dict(cp.items(name))
+    unknown = set(values) - KNOWN_KEYS[name]
+    if unknown:
+        raise PkgError(f"[{name}] unknown key(s): {', '.join(sorted(unknown))}")
+    return values
+
+
+def _parse_files(cp):
+    raw = {}
+    for key, value in cp.items("Files"):
+        m = FILE_KEY_RE.match(key)
+        if not m:
+            raise PkgError(
+                f"[Files] unknown key {key!r} (expected FileN.Source or FileN.Destination)")
+        raw.setdefault(int(m.group(1)), {})[m.group(2)] = value
+    if not raw:
+        raise PkgError("[Files] lists no files")
+
+    files, seen = [], set()
+    for idx in sorted(raw):
+        entry = raw[idx]
+        for kind in ("Source", "Destination"):
+            if kind not in entry:
+                raise PkgError(f"[Files] File{idx}.{kind} is missing")
+        src = _relpath(entry["Source"], f"File{idx}.Source")
+        dst = _relpath(entry["Destination"], f"File{idx}.Destination")
+        if dst == META_DIR or dst.startswith(META_DIR + "/"):
+            raise PkgError(f"File{idx}.Destination uses the reserved name {META_DIR!r}")
+        if dst in seen:
+            raise PkgError(f"File{idx}.Destination {dst!r} is listed more than once")
+        seen.add(dst)
+        files.append(FileEntry(idx, src, dst))
+
+    dsts = [f.destination for f in files]
+    for d in dsts:
+        for other in dsts:
+            if other.startswith(d + "/"):
+                raise PkgError(
+                    f"destination {d!r} is a file but {other!r} needs it as a directory")
+    return files
+
+
+def load_manifest(pkg_dir):
+    """Parse and validate manifest.ini in pkg_dir. Raises PkgError."""
+    path = os.path.join(pkg_dir, MANIFEST_NAME)
+    if os.path.islink(path) or not os.path.isfile(path):
+        raise PkgError(f"no regular {MANIFEST_NAME} in {pkg_dir}")
+
+    cp = configparser.ConfigParser(interpolation=None, strict=True, delimiters=("=",))
+    cp.optionxform = str  # keys are case-sensitive, e.g. File1.Source
+    try:
+        with open(path, encoding="utf-8") as fh:
+            cp.read_file(fh, source=path)
+    except (configparser.Error, UnicodeDecodeError) as exc:
+        raise PkgError(f"cannot parse {MANIFEST_NAME}: {exc}") from None
+
+    for sec in REQUIRED_SECTIONS:
+        if not cp.has_section(sec):
+            raise PkgError(f"{MANIFEST_NAME}: missing [{sec}] section")
+
+    app = _section(cp, "Application")
+    inst = _section(cp, "Installation")
+    exe = _section(cp, "Execution")
+
+    for key in ("Name", "ID", "Version", "Type"):
+        if not app.get(key):
+            raise PkgError(f"[Application] {key} is required")
+    if not ID_RE.match(app["ID"]):
+        raise PkgError(f"[Application] ID is not a valid identifier: {app['ID']!r}")
+    if not VERSION_RE.match(app["Version"]):
+        raise PkgError(f"[Application] Version is not valid: {app['Version']!r}")
+    if app["Type"] not in ALLOWED_TYPES:
+        raise PkgError(f"[Application] Type must be one of {', '.join(ALLOWED_TYPES)}")
+
+    if not inst.get("Prefix"):
+        raise PkgError("[Installation] Prefix is required")
+    prefix = _prefix(inst["Prefix"])
+
+    files = _parse_files(cp)
+    dsts = [f.destination for f in files]
+
+    executable = exe.get("Executable", "")
+    if executable:
+        executable = _relpath(executable, "[Execution] Executable")
+        if executable not in dsts:
+            raise PkgError(
+                f"[Execution] Executable {executable!r} is not a Destination in [Files]")
+    elif app["Type"] == "executable":
+        raise PkgError("[Execution] Executable is required when Type=executable")
+
+    working_dir = exe.get("WorkingDirectory", "") or "."
+    if working_dir != ".":
+        working_dir = _relpath(working_dir, "[Execution] WorkingDirectory")
+        if not any(d.startswith(working_dir + "/") for d in dsts):
+            raise PkgError(
+                f"[Execution] WorkingDirectory {working_dir!r} has no files installed under it")
+
+    run_as = exe.get("RunAs", "")
+    if run_as and not USER_RE.match(run_as):
+        raise PkgError(f"[Execution] RunAs is not a valid user name: {run_as!r}")
+
+    arguments = exe.get("Arguments", "")
+    if "\0" in arguments:
+        raise PkgError("[Execution] Arguments contains a NUL byte")
+
+    return Manifest(
+        name=app["Name"],
+        app_id=app["ID"],
+        version=app["Version"],
+        description=app.get("Description", ""),
+        app_type=app["Type"],
+        prefix=prefix,
+        files=files,
+        executable=executable,
+        working_directory=working_dir,
+        arguments=arguments,
+        run_as=run_as,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Planning (no writes)
+# ---------------------------------------------------------------------------
+
+def _mode_for(dst, executable):
+    if dst == executable or dst.startswith(("bin/", "scripts/")):
+        return EXEC_MODE
+    return DATA_MODE
+
+
+def _reject_symlinks_below(top, path):
+    """Refuse if any component of path below top is a symlink."""
+    cur = top
+    for part in os.path.relpath(path, top).split(os.sep):
+        if part in ("", os.curdir):
+            continue
+        cur = os.path.join(cur, part)
+        if os.path.islink(cur):
+            raise PkgError(f"refusing to install through symlink: {cur}")
+
+
+def _dirs_to_create(path):
+    """Return the directories that must be created so `path` exists (outermost first)."""
+    missing = []
+    d = path
+    while not os.path.lexists(d):
+        missing.append(d)
+        d = os.path.dirname(d)
+    if not os.path.isdir(d):
+        raise PkgError(f"{d} exists and is not a directory")
+    return list(reversed(missing))
+
+
+def build_plan(package_dir, root, force=False):
+    """Validate the package and compute every write. Writes nothing."""
+    if not os.path.isdir(package_dir):
+        raise PkgError(f"package directory not found: {package_dir}")
+    pkg = os.path.realpath(package_dir)
+    manifest = load_manifest(pkg)
+    with open(os.path.join(pkg, MANIFEST_NAME), "rb") as fh:
+        manifest_bytes = fh.read()
+
+    root = os.path.abspath(root)
+    install_dir = os.path.normpath(os.path.join(root, manifest.prefix.lstrip("/")))
+    _reject_symlinks_below(root, install_dir)
+
+    plan = Plan(manifest=manifest, install_dir=install_dir)
+    dirs = []
+
+    for f in manifest.files:
+        # Reject symlinks anywhere on the source path, then require a regular file.
+        cur = pkg
+        for part in f.source.split("/"):
+            cur = os.path.join(cur, part)
+            if os.path.islink(cur):
+                raise PkgError(f"{f.source}: symlinks are not allowed in a package")
+        if not os.path.isfile(cur):
+            raise PkgError(f"{f.source}: not found in package (or not a regular file)")
+
+        dst = os.path.join(install_dir, f.destination)
+        _reject_symlinks_below(root, dst)
+        if os.path.lexists(dst):
+            if os.path.isdir(dst):
+                raise PkgError(f"{f.destination}: destination is a directory")
+            if not force:
+                raise PkgError(f"{f.destination}: already exists (use --force to replace)")
+
+        dirs += _dirs_to_create(os.path.dirname(dst))
+        plan.ops.append(Op(dst=dst, mode=_mode_for(f.destination, manifest.executable),
+                           src=cur))
+
+    meta = os.path.join(install_dir, META_DIR)
+    _reject_symlinks_below(root, meta)
+    dirs += _dirs_to_create(meta)
+    listing = "".join(f.destination + "\n" for f in manifest.files)
+    plan.ops.append(Op(dst=os.path.join(meta, MANIFEST_NAME), mode=DATA_MODE,
+                       content=manifest_bytes))
+    plan.ops.append(Op(dst=os.path.join(meta, "files.txt"), mode=DATA_MODE,
+                       content=listing.encode("utf-8")))
+
+    plan.dirs = list(dict.fromkeys(dirs))
+    return plan
+
+
+# ---------------------------------------------------------------------------
+# Applying a plan (writes), with rollback
+# ---------------------------------------------------------------------------
+
+def _snapshot(path):
+    with open(path, "rb") as fh:
+        data = fh.read()
+    return data, stat.S_IMODE(os.stat(path).st_mode)
+
+
+def _try_unlink(path):
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def _rollback(created_dirs, created_files, backups, staged):
+    for tmp in staged:
+        _try_unlink(tmp)
+    for path in reversed(created_files):
+        _try_unlink(path)
+    for path, (data, mode) in backups.items():
+        try:
+            with open(path, "wb") as fh:
+                fh.write(data)
+            os.chmod(path, mode)
+        except OSError:
+            pass
+    for d in reversed(created_dirs):
+        try:
+            os.rmdir(d)
+        except OSError:
+            pass
+
+
+def apply_plan(plan):
+    """Carry out the plan. On any OSError, roll back and raise InstallError."""
+    created_dirs, created_files, staged = [], [], []
+    backups = {}
+    try:
+        for d in plan.dirs:
+            os.mkdir(d)
+            created_dirs.append(d)
+
+        for op in plan.ops:
+            existed = os.path.lexists(op.dst)
+            if existed:
+                backups[op.dst] = _snapshot(op.dst)
+
+            # Write to a temp file in the same directory, then rename into place,
+            # so a reader never sees a partially written file.
+            tmp = f"{op.dst}.pkgtmp-{os.getpid()}"
+            staged.append(tmp)
+            if op.src is not None:
+                shutil.copyfile(op.src, tmp)
+            else:
+                with open(tmp, "wb") as fh:
+                    fh.write(op.content)
+            os.chmod(tmp, op.mode)
+            os.replace(tmp, op.dst)
+            staged.remove(tmp)
+
+            if not existed:
+                created_files.append(op.dst)
+    except OSError as exc:
+        _rollback(created_dirs, created_files, backups, staged)
+        where = f"{exc.filename}: " if exc.filename else ""
+        raise InstallError(f"{where}{exc.strerror or exc}") from None
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def cmd_install(args):
+    if not os.path.isabs(args.root):
+        raise PkgError("--root must be an absolute path")
+
+    plan = build_plan(args.package_dir, args.root, force=args.force)
+    m = plan.manifest
+    data_ops = plan.ops[:-2]  # the last two are pkg_mgr metadata
+
+    print(f"Package : {m.name} ({m.app_id}) {m.version}")
+    print(f"Target  : {plan.install_dir}")
+    for op in data_ops:
+        rel = os.path.relpath(op.dst, plan.install_dir)
+        verb = "replace" if os.path.lexists(op.dst) else "install"
+        print(f"  {verb:7} {rel}  (mode {op.mode:04o})")
+
+    if args.dry_run:
+        print("dry run: nothing was written")
+        return 0
+
+    apply_plan(plan)
+    print(f"Installed {m.app_id} {m.version}: {len(data_ops)} file(s) in {plan.install_dir}")
+    if m.executable:
+        print(f"Executable: {os.path.join(m.prefix, m.executable)}")
+        print(f"  Arguments: {m.arguments!r}  RunAs: {m.run_as or '(unset)'}  "
+              f"WorkingDirectory: {m.working_directory}")
+    return 0
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="pkg_mgr",
+        description="Install an Urados application package described by manifest.ini.")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    ins = sub.add_parser("install", help="install a package from a directory")
+    ins.add_argument("package_dir", help="directory containing manifest.ini")
+    ins.add_argument("--root", default="/",
+                     help="install under this absolute directory (default: /)")
+    ins.add_argument("--dry-run", action="store_true",
+                     help="validate and show the plan without writing")
+    ins.add_argument("--force", action="store_true",
+                     help="replace files that already exist")
+    ins.set_defaults(func=cmd_install)
+    return parser
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    try:
+        return args.func(args)
+    except PkgError as exc:
+        print(f"pkg_mgr: error: {exc}", file=sys.stderr)
+        return 1
+    except InstallError as exc:
+        print(f"pkg_mgr: install failed, changes rolled back: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
