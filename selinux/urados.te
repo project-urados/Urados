@@ -14,6 +14,15 @@ policy_module(urados, 1.0)
 #     dictionaries.
 #  4. Every other domain keeps unrestricted access, except that nothing outside
 #     the owner can read or write /data/app.
+#  5. Shared objects: restricted domains (urados_user_t, urados_app_t) may only
+#     map/read/execute shared objects under /urados/lib* (urados_lib_t), and
+#     reach them through /lib* symlinks (urados_lib_link_t) that point there.
+#     No other library location is readable by these domains.
+#  6. IPC rundir /run/ipc/user (urados_ipc_t): only group 'users'
+#     (urados_user_t) may use it. Any communication mechanism is allowed
+#     (files, FIFOs, unix stream/datagram sockets, shared mappings) so that
+#     applications can layer their own encryption. Execution is forbidden by
+#     policy and the mount must also be noexec (see ipc/setup-ipc-user.sh).
 #
 # Labels are assigned in urados.fc. SELinux users are declared in
 # base/users.conf (base policy only). Login mapping (Linux user/group ->
@@ -24,22 +33,26 @@ policy_module(urados, 1.0)
 # Domain entry points (how a process becomes urados_user_t / urados_app_t) are
 # also NOT defined yet; see the PR description.
 #
-# Known limitation: shared libraries are labelled lib_t by the base policy.
-# urados_user_t needs read+execute(-map) on them to start any program, so it
-# is granted on lib_t. This permits loading libraries, not running arbitrary
-# programs, but it is broader than "only the two dictionaries".
+# Note: the base policy labels /lib* as lib_t. This module does NOT grant
+# lib_t to the restricted domains, so libraries in the base location are
+# unreadable to them. Labelling /urados/lib* as urados_lib_t is what makes
+# user programs loadable.
 
 require {
     attribute file_type;
     attribute domain;
     attribute unconfined_domain_type;
     type security_t;
-    type lib_t;
+    type var_run_t;
     type urados_root_dir_t;
     type urados_parent_dir_t;
     class file { ioctl read write create getattr setattr lock append unlink link rename execute execute_no_trans entrypoint open map };
     class dir { ioctl read write create getattr setattr lock append unlink link rename add_name remove_name reparent search rmdir open };
     class lnk_file { read write create getattr setattr lock append unlink link rename open };
+    class fifo_file { ioctl read write create getattr setattr lock append unlink link rename open };
+    class sock_file { ioctl read write create getattr setattr lock append unlink link rename open };
+    class unix_stream_socket { create read write getattr setattr ioctl lock append bind connect listen accept getopt setopt shutdown connectto };
+    class unix_dgram_socket { create read write getattr setattr ioctl lock append bind connect getopt setopt shutdown sendto };
     class process { fork transition dyntransition setcurrent setexec ptrace sigchld sigkill sigstop signull signal getsched setsched getpgid setpgid getsession getcap setcap getattr setrlimit share };
     class security { load_policy setenforce setbool setsecparam setcheckreqprot };
 }
@@ -57,7 +70,10 @@ type urados_app_t;      # owner of /data/app
 type urados_bin_user_t;   # /urados/bin/user(/.*)?
 type urados_app_prog_t;   # /user/app_prog(/.*)?
 type urados_app_data_t;   # /data/app(/.*)?  -- NOT a file_type on purpose
-type urados_path_dir_t;   # /data, /user, /urados/bin  (traversal only)
+type urados_path_dir_t;   # /data, /user, /urados/bin, /run/ipc  (traversal only)
+type urados_lib_t;        # /urados/lib[^/]*(/.*)?  shared objects for user domains
+type urados_lib_link_t;   # /lib[^/]*  symlinks only (-l) pointing to /urados/lib*
+type urados_ipc_t;        # /run/ipc/user/...  IPC rundir for group 'users'  -- NOT a file_type on purpose
 
 typeattribute urados_root_t domain;
 typeattribute urados_root_t unconfined_domain_type;
@@ -65,6 +81,8 @@ typeattribute urados_root_t unconfined_domain_type;
 typeattribute urados_bin_user_t file_type;
 typeattribute urados_app_prog_t file_type;
 typeattribute urados_path_dir_t file_type;
+typeattribute urados_lib_t file_type;
+typeattribute urados_lib_link_t file_type;
 
 
 ########################################
@@ -113,10 +131,11 @@ allow urados_app_t urados_app_data_t:lnk_file { read write create getattr setatt
 allow urados_app_t { urados_bin_user_t urados_app_prog_t }:file { getattr open read map execute execute_no_trans };
 allow urados_app_t { urados_bin_user_t urados_app_prog_t }:dir { search getattr open read };
 
-# Traversal to those dictionaries, and shared libraries to run them.
+# Traversal to those dictionaries, and shared objects to run them (rule 5).
 allow urados_app_t { urados_path_dir_t urados_root_dir_t urados_parent_dir_t }:dir { search getattr };
-allow urados_app_t lib_t:dir { search getattr };
-allow urados_app_t lib_t:file { getattr open read map execute };
+allow urados_app_t urados_lib_t:dir { search getattr open read };
+allow urados_app_t urados_lib_t:file { getattr open read map execute execute_no_trans };
+allow urados_app_t urados_lib_link_t:lnk_file { read getattr };
 
 allow urados_app_t self:process { fork sigchld };
 
@@ -127,8 +146,24 @@ allow urados_app_t self:process { fork sigchld };
 allow urados_user_t { urados_bin_user_t urados_app_prog_t }:file { getattr open read map execute execute_no_trans };
 allow urados_user_t { urados_bin_user_t urados_app_prog_t }:dir { search getattr };
 allow urados_user_t { urados_path_dir_t urados_root_dir_t urados_parent_dir_t }:dir { search getattr };
-allow urados_user_t lib_t:dir { search getattr };
-allow urados_user_t lib_t:file { getattr open read map execute };
+# /run is var_run_t on the device. Search only (traversal), so the IPC rundir
+# can be reached. No read/list rights on /run itself.
+allow urados_user_t var_run_t:dir search;
+
+# Shared objects (rule 5): read and map/execute only, under /urados/lib*.
+allow urados_user_t urados_lib_t:dir { search getattr open read };
+allow urados_user_t urados_lib_t:file { getattr open read map execute execute_no_trans };
+allow urados_user_t urados_lib_link_t:lnk_file { read getattr };
+
+# IPC rundir (rule 6): full communication rights, no execution.
+allow urados_user_t urados_ipc_t:dir { add_name remove_name create write read search getattr open ioctl lock rmdir };
+allow urados_user_t urados_ipc_t:file { create read write append getattr setattr open ioctl lock unlink rename map };
+allow urados_user_t urados_ipc_t:fifo_file { create read write append getattr setattr open ioctl lock unlink rename };
+allow urados_user_t urados_ipc_t:sock_file { create read write append getattr setattr open ioctl lock unlink rename };
+allow urados_user_t urados_ipc_t:unix_stream_socket { create read write getattr setattr ioctl lock append bind connect listen accept getopt setopt shutdown connectto };
+allow urados_user_t urados_ipc_t:unix_dgram_socket { create read write getattr setattr ioctl lock append bind connect getopt setopt shutdown sendto };
+allow urados_user_t self:unix_stream_socket { create read write getattr setattr ioctl lock append bind connect listen accept getopt setopt shutdown connectto };
+allow urados_user_t self:unix_dgram_socket { create read write getattr setattr ioctl lock append bind connect getopt setopt shutdown sendto };
 
 allow urados_user_t self:process { fork sigchld };
 
@@ -153,11 +188,29 @@ neverallow urados_root_t security_t:security { load_policy setenforce setbool se
 neverallow urados_root_t urados_app_data_t:{ file dir lnk_file } *;
 
 # (e) Group 'users': only read/execute in the two dictionaries, traversal, and
-#     the libraries needed to run them. No writes, no other types, no
-#     symlinks, no process control beyond fork/sigchld.
-neverallow urados_user_t { file_type -urados_bin_user_t -urados_app_prog_t }:file ~{ getattr open read map execute };
-neverallow urados_user_t { file_type -urados_bin_user_t -urados_app_prog_t -urados_path_dir_t -urados_root_dir_t -urados_parent_dir_t }:dir ~{ getattr search };
-neverallow urados_user_t { file_type -urados_bin_user_t -urados_app_prog_t -urados_path_dir_t -urados_root_dir_t -urados_parent_dir_t }:lnk_file *;
+#     the shared objects / IPC rundir granted above. No writes elsewhere, no
+#     other symlinks, no process control beyond fork/sigchld.
+neverallow urados_user_t { file_type -urados_bin_user_t -urados_app_prog_t -urados_lib_t }:file ~{ getattr open read map execute };
+neverallow urados_user_t { file_type -urados_bin_user_t -urados_app_prog_t -urados_path_dir_t -urados_root_dir_t -urados_parent_dir_t -urados_lib_t }:dir ~{ getattr search };
+neverallow urados_user_t { file_type -urados_bin_user_t -urados_app_prog_t -urados_path_dir_t -urados_root_dir_t -urados_parent_dir_t -urados_lib_link_t }:lnk_file *;
 neverallow urados_user_t urados_app_data_t:{ file dir lnk_file } *;
 neverallow urados_user_t { domain -urados_user_t }:process ~{ sigchld };
 neverallow urados_user_t domain:process { transition dyntransition setexec setcurrent ptrace };
+
+# (f) Shared objects (rule 5). Read/map/execute only; never write, rename,
+#     or create. The same restriction covers urados_app_t.
+neverallow { urados_user_t urados_app_t } urados_lib_t:file ~{ getattr open read map execute execute_no_trans };
+neverallow { urados_user_t urados_app_t } urados_lib_t:dir ~{ getattr search open read };
+neverallow { urados_user_t urados_app_t } urados_lib_link_t:lnk_file ~{ getattr read };
+# Non-library types cannot be reached through the /lib symlink type.
+neverallow { urados_user_t urados_app_t } { file_type -urados_lib_t -urados_bin_user_t -urados_app_prog_t }:file { execute execute_no_trans };
+
+# (g) IPC rundir (rule 6). Group 'users' only; noexec is also enforced by the
+#     mount (see ipc/setup-ipc-user.sh). No symlinks inside the rundir.
+#     urados_ipc_t is not a file_type, so no blanket grant reaches it, and
+#     root (unconfined) is denied as well. Root cannot read or list the rundir.
+neverallow urados_user_t urados_ipc_t:file { execute execute_no_trans entrypoint };
+neverallow urados_user_t urados_ipc_t:lnk_file *;
+neverallow ~urados_user_t urados_ipc_t:file { read write append create unlink rename map execute };
+neverallow ~urados_user_t urados_ipc_t:dir { read write add_name remove_name search open getattr };
+neverallow ~urados_user_t urados_ipc_t:{ fifo_file sock_file } { read write append create unlink rename open };
