@@ -8,7 +8,7 @@ policy_module(urados, 1.0)
 #     disable enforcement.
 #  2. Members of Linux group 'users' (SELinux user urados_user_u, domain
 #     urados_user_t) may only EXECUTE programs in /urados/bin/user and
-#     /user/app_prog. They get no other file access and no process control.
+#     /data/app_progs. They get no other file access and no process control.
 #  3. The owner of /data/app (SELinux user urados_app_u, domain urados_app_t)
 #     has full access to /data/app and may execute anything in the two user
 #     dictionaries.
@@ -68,9 +68,9 @@ type urados_app_t;      # owner of /data/app
 
 # File types
 type urados_bin_user_t;   # /urados/bin/user(/.*)?
-type urados_app_prog_t;   # /user/app_prog(/.*)?
+type urados_app_prog_t;   # /data/app_progs(/.*)?
 type urados_app_data_t;   # /data/app(/.*)?  -- NOT a file_type on purpose
-type urados_path_dir_t;   # /data, /user, /urados/bin, /run/ipc  (traversal only)
+type urados_path_dir_t;   # /data, /urados/bin, /run/ipc  (traversal only)
 type urados_lib_t;        # /urados/lib[^/]*(/.*)?  shared objects for user domains
 type urados_lib_link_t;   # /lib[^/]*  symlinks only (-l) pointing to /urados/lib*
 type urados_ipc_t;        # /run/ipc/user/...  IPC rundir for group 'users'  -- NOT a file_type on purpose
