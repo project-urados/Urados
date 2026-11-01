@@ -4,7 +4,7 @@
 
 /data/app(/.*)?              system_u:object_r:urados_app_data_t:s0
 /urados/bin/user(/.*)?       system_u:object_r:urados_bin_user_t:s0
-/user/app_prog(/.*)?         system_u:object_r:urados_app_prog_t:s0
+/data/app_progs(/.*)?         system_u:object_r:urados_app_prog_t:s0
 
 # Shared objects for user domains. Only /urados/lib* is a library location
 # for restricted domains.
@@ -19,6 +19,5 @@
 
 # Traversal-only directories on the path to the above.
 /data                        system_u:object_r:urados_path_dir_t:s0
-/user                        system_u:object_r:urados_path_dir_t:s0
 /urados/bin                  system_u:object_r:urados_path_dir_t:s0
 /run/ipc                     system_u:object_r:urados_path_dir_t:s0

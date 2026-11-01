@@ -1,3 +1,4 @@
 selinux/build/
 .test-tmp/
 __pycache__/
+pkg_mgr/build/
