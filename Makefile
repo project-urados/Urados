@@ -9,7 +9,8 @@
 #   make clean        remove all build output
 #
 # Requirements: gcc, pkg-config, and the development files for libxml-2.0,
-# libzip, libcurl, OpenSSL 3, libselinux, libsemanage and libacl.
+# libzip, libcurl, OpenSSL 3, libselinux, libsemanage and libacl. If any are
+# missing, the package-manager Makefile stops before starting parallel compiles.
 
 PREFIX  ?= /usr/local
 DESTDIR ?=

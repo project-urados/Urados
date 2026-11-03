@@ -10,33 +10,44 @@
 
 CC     ?= cc
 CFLAGS ?= -O2 -g
+PKG_CONFIG ?= pkg-config
 DEPS    = libxml-2.0 libzip libcurl libcrypto libselinux libsemanage libacl
 CFLAGS += -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Iinclude \
-          $(shell pkg-config --cflags $(DEPS))
-LDLIBS += $(shell pkg-config --libs $(DEPS))
+          $(shell $(PKG_CONFIG) --cflags $(DEPS) 2>/dev/null)
+LDLIBS += $(shell $(PKG_CONFIG) --libs $(DEPS) 2>/dev/null)
 
 BUILD  = build
 HDRS   = include/urados_pkg.h
 COMMON = src/common.c src/crypto.c src/manifest.c src/sys.c src/archive.c src/fetch.c src/selinux.c
 
-all: $(BUILD)/urpkg $(BUILD)/urdev $(BUILD)/apprestorecon $(BUILD)/urapp-runner
+all: check-deps $(BUILD)/urpkg $(BUILD)/urdev $(BUILD)/apprestorecon $(BUILD)/urapp-runner
 
-$(BUILD)/urpkg: $(COMMON) src/install.c src/urpkg_main.c $(HDRS) | $(BUILD)
+check-deps:
+	@command -v "$(PKG_CONFIG)" >/dev/null 2>&1 || { \
+		echo "Urados build error: pkg-config is required" >&2; exit 1; \
+	}
+	@$(PKG_CONFIG) --exists $(DEPS) || { \
+		echo "Urados build error: required development packages are missing:" >&2; \
+		$(PKG_CONFIG) --print-errors --exists $(DEPS) || true; \
+		echo "See docs/BUILD.md for installation commands." >&2; exit 1; \
+	}
+
+$(BUILD)/urpkg: check-deps $(COMMON) src/install.c src/urpkg_main.c $(HDRS) | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ $(COMMON) src/install.c src/urpkg_main.c $(LDLIBS)
 
-$(BUILD)/urdev: $(COMMON) src/pack.c src/urdev_main.c $(HDRS) | $(BUILD)
+$(BUILD)/urdev: check-deps $(COMMON) src/pack.c src/urdev_main.c $(HDRS) | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ $(COMMON) src/pack.c src/urdev_main.c $(LDLIBS)
 
-$(BUILD)/apprestorecon: $(COMMON) src/apprestorecon_main.c $(HDRS) | $(BUILD)
+$(BUILD)/apprestorecon: check-deps $(COMMON) src/apprestorecon_main.c $(HDRS) | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ $(COMMON) src/apprestorecon_main.c $(LDLIBS)
 
-$(BUILD)/urapp-runner: src/app_runner.c $(HDRS) | $(BUILD)
+$(BUILD)/urapp-runner: check-deps src/app_runner.c $(HDRS) | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ src/app_runner.c $(shell pkg-config --libs libselinux)
 
-$(BUILD)/urpkg_small_limit: $(COMMON) src/install.c src/urpkg_main.c $(HDRS) | $(BUILD)
+$(BUILD)/urpkg_small_limit: check-deps $(COMMON) src/install.c src/urpkg_main.c $(HDRS) | $(BUILD)
 	$(CC) $(CFLAGS) -DPKG_UNPACKED_MAX=65536 -o $@ $(COMMON) src/install.c src/urpkg_main.c $(LDLIBS)
 
-$(BUILD)/test_extract_limit: $(COMMON) tests/test_extract_limit.c $(HDRS) | $(BUILD)
+$(BUILD)/test_extract_limit: check-deps $(COMMON) tests/test_extract_limit.c $(HDRS) | $(BUILD)
 	$(CC) $(CFLAGS) -DPKG_UNPACKED_MAX=65536 -o $@ $(COMMON) tests/test_extract_limit.c $(LDLIBS)
 
 $(BUILD):
@@ -49,4 +60,4 @@ test: all $(BUILD)/urpkg_small_limit $(BUILD)/test_extract_limit
 clean:
 	rm -rf $(BUILD) 2>/dev/null || sudo -n rm -rf $(BUILD)
 
-.PHONY: all test clean
+.PHONY: all check-deps test clean
