@@ -5,7 +5,8 @@
  *   urdev check  <dir>                           validate manifest and entry
  *   urdev keygen <private.pem> <public.pem> [--no-passphrase]
  *                                                create an Ed25519 signing key
- *   urdev pack   <dir> <out.zip> [--key FILE]    sign and zip a project
+ *   urdev csr    <private.pem> <request.csr> <CN> create a certificate request
+ *   urdev pack   <dir> <out.zip> [--key FILE] [--cert CHAIN.pem]
  *
  * pack asks for the signing key path when --key is not given. OpenSSL asks for
  * the key's passphrase on the terminal when the key is encrypted.
@@ -24,7 +25,8 @@ static void usage(FILE *f)
           "  urdev init   <dir> <name> [version]\n"
           "  urdev check  <dir>\n"
           "  urdev keygen <private.pem> <public.pem> [--no-passphrase]\n"
-          "  urdev pack   <dir> <out.zip> [--key FILE]\n",
+          "  urdev csr    <private.pem> <request.csr> <common-name>\n"
+          "  urdev pack   <dir> <out.zip> [--key FILE] [--cert CHAIN.pem]\n",
           f);
 }
 
@@ -40,7 +42,7 @@ static int prompt_key(char *buf, size_t len)
 
     if (!isatty(STDIN_FILENO))
         return -1;
-    fputs("Signing key (private PEM, Ed25519) path: ", stderr);
+    fputs("Signing key (private PEM) path: ", stderr);
     if (!fgets(buf, (int)len, stdin))
         return -1;
     n = strcspn(buf, "\r\n");
@@ -109,12 +111,26 @@ int main(int argc, char **argv)
             return 1;
         }
         printf("wrote private key %s (keep it secret) and public key %s\n", argv[2], argv[3]);
-        printf("install the public key in the device's trusted key directory\n");
+        printf("for certificate signing, create a CSR with: urdev csr %s request.csr <common-name>\n", argv[2]);
+        return 0;
+    }
+
+    if (strcmp(cmd, "csr") == 0) {
+        if (argc != 5) {
+            usage(stderr);
+            return 2;
+        }
+        if (pkg_create_csr(argv[2], argv[3], argv[4], err, sizeof(err)) != 0) {
+            fail(err);
+            return 1;
+        }
+        printf("created CSR %s; send only the CSR to your certificate authority\n", argv[3]);
         return 0;
     }
 
     if (strcmp(cmd, "pack") == 0) {
         const char *keyarg = NULL;
+        const char *certarg = NULL;
         int i;
 
         if (argc < 4) {
@@ -124,6 +140,8 @@ int main(int argc, char **argv)
         for (i = 4; i < argc; i++) {
             if (strcmp(argv[i], "--key") == 0 && i + 1 < argc)
                 keyarg = argv[++i];
+            else if (strcmp(argv[i], "--cert") == 0 && i + 1 < argc)
+                certarg = argv[++i];
             else {
                 usage(stderr);
                 return 2;
@@ -140,11 +158,11 @@ int main(int argc, char **argv)
             fail(err);
             goto done;
         }
-        if (pkg_pack(argv[2], argv[3], key, err, sizeof(err)) != 0) {
+        if (pkg_pack(argv[2], argv[3], key, certarg, err, sizeof(err)) != 0) {
             fail(err);
             goto done;
         }
-        printf("packed %s\n", argv[3]);
+        printf("packed %s%s\n", argv[3], certarg ? " with certificate chain" : "");
         rc = 0;
         goto done;
     }

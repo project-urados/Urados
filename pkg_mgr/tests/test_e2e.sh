@@ -55,6 +55,24 @@ mkdir -p "$T"
 sudo -n md5sum /var/lib/selinux/default/active/seusers /var/lib/selinux/default/active/users_extra | sort >"$T/host-sel.md5"
 "$URDEV" keygen "$T/dev.pem" "$T/dev.pub" --no-passphrase >/dev/null
 "$URDEV" keygen "$T/rogue.pem" "$T/rogue.pub" --no-passphrase >/dev/null
+openssl req -x509 -newkey rsa:2048 -nodes -keyout "$T/root.key" -out "$T/root.crt" \
+    -days 3650 -subj "/CN=Urados Test Root" \
+    -addext "basicConstraints=critical,CA:TRUE" \
+    -addext "keyUsage=critical,keyCertSign,cRLSign" >/dev/null 2>&1
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$T/company.key" >/dev/null 2>&1
+expect_ok "urdev creates a publisher CSR" "$URDEV" csr "$T/company.key" "$T/company.csr" "Test Company Publisher"
+expect_ok "publisher CSR signature is valid" openssl req -in "$T/company.csr" -verify -noout
+cat > "$T/codesign.ext" <<'EOF'
+basicConstraints=critical,CA:FALSE
+keyUsage=critical,digitalSignature
+extendedKeyUsage=codeSigning
+subjectKeyIdentifier=hash
+authorityKeyIdentifier=keyid,issuer
+EOF
+openssl x509 -req -in "$T/company.csr" -CA "$T/root.crt" -CAkey "$T/root.key" \
+    -CAcreateserial -out "$T/company.crt" -days 365 -sha256 \
+    -extfile "$T/codesign.ext" >/dev/null 2>&1
+cp "$T/company.crt" "$T/company-chain.pem"
 gcc -static -O2 -Wall -o "$T/probe" "$HERE/tests/probe.c"
 
 sudo -n mkdir -p "$ROOT/etc/urados/keys" "$ROOT/data"
@@ -65,6 +83,7 @@ printf 'root:!:19000:0:99999:7:::\n' | sudo -n tee "$ROOT/etc/shadow" >/dev/null
 printf 'root:!::\nusers:!::\n' | sudo -n tee "$ROOT/etc/gshadow" >/dev/null
 sudo -n chmod 600 "$ROOT/etc/shadow" "$ROOT/etc/gshadow"
 sudo -n cp "$T/dev.pub" "$ROOT/etc/urados/keys/dev.pem"
+sudo -n cp "$T/root.crt" "$ROOT/etc/urados/keys/test-root.crt"
 
 # SELinux: a private copy of the policy store. libsemanage writes only under
 # $ROOT (semanage_set_root), so the host store is never modified.
@@ -81,14 +100,27 @@ printf '/data/app(/.*)?\tsystem_u:object_r:user_home_t:s0\n' |
 cp "$T/probe" "$T/notes/app/notes"
 echo "not for the app to read" > "$T/notes/app/extra.txt"
 expect_ok "urdev check accepts a new project" "$URDEV" check "$T/notes"
-expect_ok "urdev pack signs with a key file" "$URDEV" pack "$T/notes" "$T/notes-1.0.0.zip" --key "$T/dev.pem"
+expect_ok "urdev pack signs with a certificate chain and local key" "$URDEV" pack "$T/notes" "$T/notes-1.0.0.zip" --key "$T/company.key" --cert "$T/company-chain.pem"
+expect_fail "urdev rejects a certificate that does not match the signing key" "$URDEV" pack "$T/notes" "$T/cert-key-mismatch.zip" --key "$T/dev.pem" --cert "$T/company-chain.pem"
 "$URDEV" init "$T/other" other 1.0.0 >/dev/null
 cp "$T/probe" "$T/other/app/other"
 "$URDEV" pack "$T/other" "$T/other-rogue.zip" --key "$T/rogue.pem" >/dev/null
 "$URDEV" pack "$T/other" "$T/other-1.0.0.zip" --key "$T/dev.pem" >/dev/null
+openssl req -x509 -newkey rsa:2048 -nodes -keyout "$T/rogue-root.key" -out "$T/rogue-root.crt" \
+    -days 3650 -subj "/CN=Untrusted Test Root" \
+    -addext "basicConstraints=critical,CA:TRUE" \
+    -addext "keyUsage=critical,keyCertSign,cRLSign" >/dev/null 2>&1
+"$URDEV" csr "$T/rogue.pem" "$T/rogue.csr" "Untrusted Publisher" >/dev/null
+openssl x509 -req -in "$T/rogue.csr" -CA "$T/rogue-root.crt" -CAkey "$T/rogue-root.key" \
+    -CAcreateserial -out "$T/rogue-publisher.crt" -days 365 -sha256 \
+    -extfile "$T/codesign.ext" >/dev/null 2>&1
+cp "$T/rogue-publisher.crt" "$T/rogue-chain.pem"
+"$URDEV" pack "$T/other" "$T/other-untrusted-cert.zip" --key "$T/rogue.pem" --cert "$T/rogue-chain.pem" >/dev/null
 
 echo "== verify (no root needed)"
-expect_ok "signed package verifies against trusted keys" "$URPKG" --root "$ROOT" verify "$T/notes-1.0.0.zip"
+expect_ok "certificate-signed package verifies against trusted CA root" "$URPKG" --root "$ROOT" verify "$T/notes-1.0.0.zip"
+expect_ok "legacy public-key package remains supported" "$URPKG" --root "$ROOT" verify "$T/other-1.0.0.zip"
+expect_fail "certificate signed by an untrusted CA is rejected" "$URPKG" --root "$ROOT" verify "$T/other-untrusted-cert.zip"
 expect_fail "package signed by an untrusted key is rejected" "$URPKG" --root "$ROOT" verify "$T/other-rogue.zip"
 
 rm -rf "$T/tamper" && mkdir "$T/tamper"

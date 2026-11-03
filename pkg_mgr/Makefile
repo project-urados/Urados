@@ -4,8 +4,8 @@
 # libcurl and OpenSSL 3.
 #
 #   make        build build/urpkg and build/urdev
-#   make test   build, then run the end-to-end suite (needs passwordless sudo
-#               for the root-only steps; see tests/test_e2e.sh)
+#   make test   build, run certificate tests, then end-to-end tests (the latter
+#               need passwordless sudo and a SELinux policy store)
 
 CC     ?= cc
 CFLAGS ?= -O2 -g
@@ -29,10 +29,17 @@ $(BUILD)/urdev: $(COMMON) src/pack.c src/urdev_main.c $(HDRS) | $(BUILD)
 $(BUILD)/apprestorecon: $(COMMON) src/apprestorecon_main.c $(HDRS) | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ $(COMMON) src/apprestorecon_main.c $(LDLIBS)
 
+$(BUILD)/urpkg_small_limit: $(COMMON) src/install.c src/urpkg_main.c $(HDRS) | $(BUILD)
+	$(CC) $(CFLAGS) -DPKG_UNPACKED_MAX=65536 -o $@ $(COMMON) src/install.c src/urpkg_main.c $(LDLIBS)
+
+$(BUILD)/test_extract_limit: $(COMMON) tests/test_extract_limit.c $(HDRS) | $(BUILD)
+	$(CC) $(CFLAGS) -DPKG_UNPACKED_MAX=65536 -o $@ $(COMMON) tests/test_extract_limit.c $(LDLIBS)
+
 $(BUILD):
 	mkdir -p $@
 
-test: all
+test: all $(BUILD)/urpkg_small_limit $(BUILD)/test_extract_limit
+	sh tests/test_cert.sh
 	sh tests/test_e2e.sh
 
 clean:

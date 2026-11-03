@@ -6,7 +6,8 @@
  *
  * Package format: a zip archive containing
  *   manifest.xml   XML manifest (schema in src/manifest.c)
- *   SIGNATURE      raw Ed25519 signature over the digest text
+ *   SIGNATURE      signature over the digest text
+ *   SIGNER_CERTS   optional PEM leaf/intermediate X.509 chain
  *   app/<rel>      payload files, installed as system_cache/app/<rel>
  *
  * Digest text: one line per archive file except SIGNATURE (manifest.xml is
@@ -47,17 +48,21 @@
 #define PKG_AUTHOR_MAX  127
 #define PKG_ENTRY_MAX   255
 #define PKG_PATH_MAX    1024
-#define PKG_META_MAX    (1024u * 1024u)        /* manifest.xml and SIGNATURE */
+#define PKG_META_MAX    (1024u * 1024u)        /* manifest, signature, signer chain */
 #define PKG_FILE_MAX    (256u * 1024u * 1024u) /* any single payload file */
 #define PKG_ARCHIVE_MAX (1024u * 1024u * 1024u)
+#ifndef PKG_UNPACKED_MAX
+#define PKG_UNPACKED_MAX (1024ull * 1024ull * 1024ull)
+#endif
 #define PKG_FILES_MAX   4096
 #define PKG_GROUPS_MAX  64
 #define PKG_ARGS_MAX    64
 
 #define PKG_MANIFEST_FILE  "manifest.xml"
 #define PKG_SIGNATURE_FILE "SIGNATURE"
+#define PKG_SIGNER_CERTS_FILE "SIGNER_CERTS.pem"
 #define PKG_ARCHIVE_FILE   "package.zip"      /* name of the trusted copy */
-#define PKG_KEYS_SUBDIR    "/etc/urados/keys" /* trusted *.pem Ed25519 public keys */
+#define PKG_KEYS_SUBDIR    "/etc/urados/keys" /* trusted *.crt roots; legacy Ed25519 *.pem */
 #define PKG_DATA_DIR       "/data"
 #define PKG_PROGS_DIR      "/data/app_progs"
 #define PKG_STAGING_DIR    ".staging"
@@ -92,14 +97,14 @@ typedef struct {
 /* Result of a successful verification. Release with pkg_verified_free(). */
 typedef struct {
     pkg_manifest manifest;
-    pkg_digest *digests; /* sorted by name; includes manifest.xml, excludes SIGNATURE */
+    pkg_digest *digests; /* sorted; includes manifest/signer chain, excludes SIGNATURE */
     size_t ndigests;
 } pkg_verified;
 
 /* Options shared by the urpkg commands. */
 typedef struct {
     const char *root;      /* "" for the device, or an absolute staging prefix */
-    const char *keys_dir;  /* directory of trusted *.pem Ed25519 public keys */
+    const char *keys_dir;  /* trusted *.crt roots; legacy Ed25519 *.pem keys */
 } pkg_opts;
 
 /* Current SELinux state of an app (pkg_sel_query). */
@@ -141,12 +146,21 @@ int  pkg_sign_data(EVP_PKEY *key, const unsigned char *data, size_t dlen,
 int  pkg_load_private_key(const char *path, EVP_PKEY **key, char *err, size_t errlen);
 int  pkg_generate_key(const char *priv_path, const char *pub_path, int encrypt,
                       char *err, size_t errlen);
+int  pkg_validate_signer_certificate(const unsigned char *chain, size_t chainlen,
+                                     EVP_PKEY *key, char *err, size_t errlen);
+int  pkg_verify_certificate_signature(const unsigned char *chain, size_t chainlen,
+                                      const char *roots_dir,
+                                      const unsigned char *data, size_t datalen,
+                                      const unsigned char *sig, size_t siglen,
+                                      char *err, size_t errlen);
+int  pkg_create_csr(const char *keypath, const char *csrpath, const char *common_name,
+                    char *err, size_t errlen);
 
 /* archive.c */
 int  pkg_verify(const char *zip_path, const char *keys_dir, pkg_verified *v,
                 char *err, size_t errlen);
 int  pkg_verify_keys(const char *zip_path, EVP_PKEY **keys, size_t nkeys,
-                     pkg_verified *v, char *err, size_t errlen);
+                     const char *roots_dir, pkg_verified *v, char *err, size_t errlen);
 int  pkg_extract(const char *zip_path, int appfd, gid_t gid, const pkg_verified *v,
                  char *err, size_t errlen);
 void pkg_verified_free(pkg_verified *v);
@@ -184,6 +198,7 @@ int  pkg_init_project(const char *dir, const char *name, const char *version,
                       char *err, size_t errlen);
 int  pkg_check_project(const char *dir, pkg_manifest *m, char *err, size_t errlen);
 int  pkg_pack(const char *dir, const char *out_zip, EVP_PKEY *key,
+              const char *cert_chain_path,
               char *err, size_t errlen);
 
 /* install.c (urpkg) */

@@ -2,12 +2,13 @@
  * archive.c - verify and extract package archives (libzip + OpenSSL).
  *
  * Verification never trusts anything before the signature is checked:
- *   1. Walk every zip entry. Accept only manifest.xml, SIGNATURE and
+ *   1. Walk every zip entry. Accept only manifest.xml, SIGNATURE,
+ *      SIGNER_CERTS.pem and
  *      app/<safe path> regular files. Reject directories, symlinks, devices,
  *      encrypted entries, duplicate names and oversized files.
  *   2. Hash every accepted file (streaming, size-limited).
  *   3. Build the digest text (see urados_pkg.h) and check SIGNATURE against
- *      the trusted keys.
+ *      either its signer chain and trusted roots or the legacy keys.
  *   4. Only then parse manifest.xml and check that its <entry> is a signed
  *      payload file.
  *
@@ -17,6 +18,7 @@
  */
 #include <errno.h>
 #include <fcntl.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,7 +35,16 @@
 static zip_t *open_zip(const char *path, char *err, size_t errlen)
 {
     int ec = 0;
-    zip_t *z = zip_open(path, ZIP_RDONLY, &ec);
+    struct stat st;
+    zip_t *z;
+
+    if (lstat(path, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0 ||
+        (uint64_t)st.st_size > PKG_ARCHIVE_MAX) {
+        pkg_seterr(err, errlen, "package %s is not a regular file or exceeds the %u-byte archive limit",
+                   path, PKG_ARCHIVE_MAX);
+        return NULL;
+    }
+    z = zip_open(path, ZIP_RDONLY, &ec);
 
     if (!z) {
         zip_error_t e;
@@ -79,7 +90,8 @@ static int check_entry_kind(zip_t *z, zip_uint64_t idx, const char *name,
 
 static int name_allowed(const char *name)
 {
-    if (strcmp(name, PKG_MANIFEST_FILE) == 0 || strcmp(name, PKG_SIGNATURE_FILE) == 0)
+    if (strcmp(name, PKG_MANIFEST_FILE) == 0 || strcmp(name, PKG_SIGNATURE_FILE) == 0 ||
+        strcmp(name, PKG_SIGNER_CERTS_FILE) == 0)
         return 1;
     if (strncmp(name, PKG_ZIP_APP_PREFIX, strlen(PKG_ZIP_APP_PREFIX)) != 0)
         return 0;
@@ -88,11 +100,11 @@ static int name_allowed(const char *name)
 
 /*
  * Reads one entry, hashing it. If keep is non-NULL the contents are also
- * returned (NUL-terminated). Fails if the entry exceeds max bytes.
+ * returned (NUL-terminated). Enforces both the per-entry and aggregate limits.
  */
 static int read_entry(zip_t *z, zip_uint64_t idx, const char *name, size_t max,
                       unsigned char **keep, size_t *keeplen, char hex[65],
-                      char *err, size_t errlen)
+                      uint64_t *aggregate, char *err, size_t errlen)
 {
     zip_file_t *f;
     EVP_MD_CTX *ctx = NULL;
@@ -133,10 +145,16 @@ static int read_entry(zip_t *z, zip_uint64_t idx, const char *name, size_t max,
             pkg_seterr(err, errlen, "'%s' is larger than the allowed %zu bytes", name, max);
             goto out;
         }
+        if (!aggregate || *aggregate > PKG_UNPACKED_MAX - (uint64_t)n) {
+            pkg_seterr(err, errlen, "package exceeds the %llu-byte uncompressed data limit",
+                       (unsigned long long)PKG_UNPACKED_MAX);
+            goto out;
+        }
         EVP_DigestUpdate(ctx, buf, (size_t)n);
         if (kbuf)
             memcpy(kbuf + total, buf, (size_t)n);
         total += (size_t)n;
+        *aggregate += (uint64_t)n;
     }
     if (EVP_DigestFinal_ex(ctx, md, &mdlen) != 1) {
         pkg_seterr(err, errlen, "hash failure");
@@ -176,6 +194,7 @@ void pkg_verified_free(pkg_verified *v)
 }
 
 int pkg_verify_keys(const char *zip_path, EVP_PKEY **keys, size_t nkeys,
+                    const char *roots_dir,
                     pkg_verified *v, char *err, size_t errlen)
 {
     zip_t *z;
@@ -183,9 +202,10 @@ int pkg_verify_keys(const char *zip_path, EVP_PKEY **keys, size_t nkeys,
     zip_uint64_t i;
     pkg_digest *digs = NULL;
     size_t nd = 0, cap = 0, k;
-    unsigned char *sig = NULL, *mbuf = NULL, *dtext = NULL;
-    size_t siglen = 0, mlen = 0, dlen = 0;
-    int have_sig = 0, have_manifest = 0, rc = -1;
+    unsigned char *sig = NULL, *mbuf = NULL, *cert_chain = NULL, *dtext = NULL;
+    size_t siglen = 0, mlen = 0, cert_chain_len = 0, dlen = 0;
+    uint64_t unpacked = 0;
+    int have_sig = 0, have_manifest = 0, have_cert_chain = 0, rc = -1;
     char entry_zip[PKG_PATH_MAX];
 
     memset(v, 0, sizeof(*v));
@@ -194,7 +214,7 @@ int pkg_verify_keys(const char *zip_path, EVP_PKEY **keys, size_t nkeys,
         return -1;
 
     count = zip_get_num_entries(z, 0);
-    if (count <= 0 || count > PKG_FILES_MAX + 2) {
+    if (count <= 0 || count > PKG_FILES_MAX + 3) {
         pkg_seterr(err, errlen, "package has no entries or too many entries");
         goto out;
     }
@@ -202,6 +222,7 @@ int pkg_verify_keys(const char *zip_path, EVP_PKEY **keys, size_t nkeys,
     for (i = 0; i < (zip_uint64_t)count; i++) {
         const char *name = zip_get_name(z, i, 0);
         char hex[65];
+        int is_chain = 0;
 
         if (!name) {
             pkg_seterr(err, errlen, "unreadable entry name");
@@ -218,20 +239,32 @@ int pkg_verify_keys(const char *zip_path, EVP_PKEY **keys, size_t nkeys,
                 pkg_seterr(err, errlen, "duplicate %s", PKG_SIGNATURE_FILE);
                 goto out;
             }
-            if (read_entry(z, i, name, PKG_META_MAX, &sig, &siglen, hex, err, errlen))
+            if (read_entry(z, i, name, PKG_META_MAX, &sig, &siglen, hex, &unpacked, err, errlen))
                 goto out;
             have_sig = 1;
             continue; /* SIGNATURE is not part of the digest text */
+        }
+        if (strcmp(name, PKG_SIGNER_CERTS_FILE) == 0) {
+            if (have_cert_chain) {
+                pkg_seterr(err, errlen, "duplicate %s", PKG_SIGNER_CERTS_FILE);
+                goto out;
+            }
+            if (read_entry(z, i, name, PKG_META_MAX, &cert_chain, &cert_chain_len,
+                           hex, &unpacked, err, errlen))
+                goto out;
+            have_cert_chain = 1;
+            is_chain = 1;
         }
         if (strcmp(name, PKG_MANIFEST_FILE) == 0) {
             if (have_manifest) {
                 pkg_seterr(err, errlen, "duplicate %s", PKG_MANIFEST_FILE);
                 goto out;
             }
-            if (read_entry(z, i, name, PKG_META_MAX, &mbuf, &mlen, hex, err, errlen))
+            if (read_entry(z, i, name, PKG_META_MAX, &mbuf, &mlen, hex, &unpacked, err, errlen))
                 goto out;
             have_manifest = 1;
-        } else if (read_entry(z, i, name, PKG_FILE_MAX, NULL, NULL, hex, err, errlen)) {
+        } else if (!is_chain && read_entry(z, i, name, PKG_FILE_MAX, NULL, NULL,
+                                           hex, &unpacked, err, errlen)) {
             goto out;
         }
 
@@ -275,8 +308,12 @@ int pkg_verify_keys(const char *zip_path, EVP_PKEY **keys, size_t nkeys,
         pkg_seterr(err, errlen, "out of memory");
         goto out;
     }
-    if (!keys || nkeys == 0 ||
-        pkg_check_signature(keys, nkeys, dtext, dlen, sig, siglen) != 0) {
+    if (have_cert_chain) {
+        if (!roots_dir || pkg_verify_certificate_signature(cert_chain, cert_chain_len,
+                roots_dir, dtext, dlen, sig, siglen, err, errlen) != 0)
+            goto out;
+    } else if (!keys || nkeys == 0 ||
+               pkg_check_signature(keys, nkeys, dtext, dlen, sig, siglen) != 0) {
         pkg_seterr(err, errlen, "signature verification failed (untrusted or modified package)");
         goto out;
     }
@@ -311,6 +348,7 @@ out:
     }
     free(sig);
     free(mbuf);
+    free(cert_chain);
     free(dtext);
     zip_close(z);
     return rc;
@@ -325,7 +363,7 @@ int pkg_verify(const char *zip_path, const char *keys_dir, pkg_verified *v,
 
     if (pkg_load_trusted_keys(keys_dir, &keys, &nkeys, err, errlen) != 0)
         return -1;
-    rc = pkg_verify_keys(zip_path, keys, nkeys, v, err, errlen);
+    rc = pkg_verify_keys(zip_path, keys, nkeys, keys_dir, v, err, errlen);
     pkg_free_keys(keys, nkeys);
     return rc;
 }
@@ -342,6 +380,7 @@ int pkg_extract(const char *zip_path, int appfd, gid_t gid, const pkg_verified *
     zip_t *z;
     zip_int64_t count;
     size_t i;
+    uint64_t unpacked = 0;
     char entry_zip[PKG_PATH_MAX];
     int rc = -1;
 
@@ -364,8 +403,9 @@ int pkg_extract(const char *zip_path, int appfd, gid_t gid, const pkg_verified *
         EVP_MD_CTX *ctx;
         unsigned char md[EVP_MAX_MD_SIZE], buf[IO_CHUNK];
         unsigned int mdlen = 0;
+        size_t file_total = 0;
         char hex[65];
-        int ok = 0;
+        int ok = 0, size_limit = 0;
         mode_t fmode;
 
         if (strncmp(d->name, PKG_ZIP_APP_PREFIX, strlen(PKG_ZIP_APP_PREFIX)) != 0)
@@ -440,9 +480,17 @@ int pkg_extract(const char *zip_path, int appfd, gid_t gid, const pkg_verified *
                     ok = 1;
                     break;
                 }
+                if (file_total > PKG_FILE_MAX - (size_t)n ||
+                    unpacked > PKG_UNPACKED_MAX - (uint64_t)n) {
+                    pkg_seterr(err, errlen, "extracted package data exceeds the configured size limit");
+                    size_limit = 1;
+                    break;
+                }
                 EVP_DigestUpdate(ctx, buf, (size_t)n);
                 if (pkg_write_all(ffd, buf, (size_t)n) != 0)
                     break;
+                file_total += (size_t)n;
+                unpacked += (uint64_t)n;
             }
             zip_fclose(f);
         }
@@ -450,7 +498,8 @@ int pkg_extract(const char *zip_path, int appfd, gid_t gid, const pkg_verified *
         EVP_MD_CTX_free(ctx);
         pkg_hex_encode(md, mdlen, hex);
         if (!ok || strcmp(hex, d->hex) != 0) {
-            pkg_seterr(err, errlen, "'%s' does not match its signed digest", d->name);
+            if (!size_limit)
+                pkg_seterr(err, errlen, "'%s' does not match its signed digest", d->name);
             close(ffd);
             goto out;
         }

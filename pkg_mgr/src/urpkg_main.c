@@ -6,7 +6,8 @@
  *   urpkg [--root DIR] [--keys DIR] verify <package.zip>
  *
  *   --root DIR  Prefix every device path (staging and tests). Default: /.
- *   --keys DIR  Trusted public keys. Default: <root>/etc/urados/keys.
+ *   --keys DIR  Trusted *.crt CA roots plus legacy *.pem Ed25519 keys.
+ *               Default: <root>/etc/urados/keys.
  *   <source>    A local path or an http(s) URL.
  */
 #include <stdio.h>
@@ -19,7 +20,7 @@ static void usage(FILE *f)
     fputs("usage: urpkg [--root DIR] [--keys DIR] <command>\n"
           "  install <source>         install a signed package (path or http(s) URL)\n"
           "  start <name> [args...]   verify, extract and run an installed app\n"
-          "  verify <package.zip>     check a package against the trusted keys\n",
+          "  verify <package.zip>     check a package against trusted CA roots/legacy keys\n",
           f);
 }
 
