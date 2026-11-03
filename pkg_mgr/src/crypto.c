@@ -498,8 +498,26 @@ out:
     X509_free(leaf);
     return rc;
 }
-int pkg_create_csr(const char *keypath, const char *csrpath, const char *common_name,
-                   char *err, size_t errlen)
+static int add_subject_field(X509_NAME *name, const char *label, const char *value,
+                             size_t maxlen, char *err, size_t errlen)
+{
+    if (!value || !*value)
+        return 0;
+    if (strlen(value) > maxlen) {
+        pkg_seterr(err, errlen, "certificate subject field %s is too long (max %zu characters)",
+                   label, maxlen);
+        return -1;
+    }
+    if (X509_NAME_add_entry_by_txt(name, label, MBSTRING_UTF8,
+                                   (const unsigned char *)value, -1, -1, 0) != 1) {
+        pkg_seterr(err, errlen, "cannot add certificate subject field %s", label);
+        return -1;
+    }
+    return 0;
+}
+
+int pkg_create_csr(const char *keypath, const char *csrpath,
+                   const pkg_cert_subject *subject, char *err, size_t errlen)
 {
     EVP_PKEY *key = NULL;
     X509_REQ *req = NULL;
@@ -508,7 +526,8 @@ int pkg_create_csr(const char *keypath, const char *csrpath, const char *common_
     char *pem = NULL;
     long pemlen;
     int fd = -1, rc = -1;
-    if (!common_name || !*common_name || strlen(common_name) > 255) {
+    if (!subject || !subject->common_name || !*subject->common_name ||
+        strlen(subject->common_name) > 255) {
         pkg_seterr(err, errlen, "CSR common name must contain 1 to 255 characters");
         return -1;
     }
@@ -521,8 +540,13 @@ int pkg_create_csr(const char *keypath, const char *csrpath, const char *common_
         pkg_seterr(err, errlen, "out of memory");
         goto out;
     }
-    if (X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_UTF8,
-                                   (const unsigned char *)common_name, -1, -1, 0) != 1 ||
+    if (add_subject_field(name, "C", subject->country, 2, err, errlen) != 0 ||
+        add_subject_field(name, "ST", subject->state, 255, err, errlen) != 0 ||
+        add_subject_field(name, "L", subject->locality, 255, err, errlen) != 0 ||
+        add_subject_field(name, "O", subject->organization, 255, err, errlen) != 0 ||
+        add_subject_field(name, "OU", subject->organizational_unit, 255, err, errlen) != 0 ||
+        add_subject_field(name, "CN", subject->common_name, 255, err, errlen) != 0 ||
+        add_subject_field(name, "emailAddress", subject->email, 255, err, errlen) != 0 ||
         X509_REQ_set_version(req, 0L) != 1 || X509_REQ_set_subject_name(req, name) != 1 ||
         X509_REQ_set_pubkey(req, key) != 1 ||
         X509_REQ_sign(req, key, signing_digest(key)) <= 0 ||

@@ -5,7 +5,7 @@
  *   urdev check  <dir>                           validate manifest and entry
  *   urdev keygen <private.pem> <public.pem> [--no-passphrase]
  *                                                create an Ed25519 signing key
- *   urdev csr    <private.pem> <request.csr> <CN> create a certificate request
+ *   urdev csr    <private.pem> <request.csr> [subject options]
  *   urdev pack   <dir> <out.zip> --key FILE --cert CHAIN.pem
  *
  * pack asks for the signing key path when --key is not given. OpenSSL asks for
@@ -25,7 +25,10 @@ static void usage(FILE *f)
           "  urdev init   <dir> <name> [version]\n"
           "  urdev check  <dir>\n"
           "  urdev keygen <private.pem> <public.pem> [--no-passphrase]\n"
-          "  urdev csr    <private.pem> <request.csr> <common-name>\n"
+          "  urdev csr    <private.pem> <request.csr> [subject options]\n"
+          "               --common-name CN [--country C] [--state ST]\n"
+          "               [--locality L] [--organization O]\n"
+          "               [--organizational-unit OU] [--email ADDRESS]\n"
           "  urdev pack   <dir> <out.zip> --key FILE --cert CHAIN.pem\n",
           f);
 }
@@ -111,16 +114,54 @@ int main(int argc, char **argv)
             return 1;
         }
         printf("wrote private key %s (keep it secret) and public key %s\n", argv[2], argv[3]);
-        printf("for certificate signing, create a CSR with: urdev csr %s request.csr <common-name>\n", argv[2]);
+        printf("for certificate signing, create a CSR with: urdev csr %s request.csr --common-name <CN> [subject options]\n", argv[2]);
         return 0;
     }
 
     if (strcmp(cmd, "csr") == 0) {
-        if (argc != 5) {
+        pkg_cert_subject subject = { 0 };
+        int i;
+
+        if (argc < 4) {
             usage(stderr);
             return 2;
         }
-        if (pkg_create_csr(argv[2], argv[3], argv[4], err, sizeof(err)) != 0) {
+        for (i = 4; i < argc; i++) {
+            const char **dst = NULL;
+
+            if (strcmp(argv[i], "--country") == 0)
+                dst = &subject.country;
+            else if (strcmp(argv[i], "--state") == 0)
+                dst = &subject.state;
+            else if (strcmp(argv[i], "--locality") == 0)
+                dst = &subject.locality;
+            else if (strcmp(argv[i], "--organization") == 0)
+                dst = &subject.organization;
+            else if (strcmp(argv[i], "--organizational-unit") == 0)
+                dst = &subject.organizational_unit;
+            else if (strcmp(argv[i], "--common-name") == 0)
+                dst = &subject.common_name;
+            else if (strcmp(argv[i], "--email") == 0)
+                dst = &subject.email;
+            else if (i == 4 && argc == 5) {
+                /* Keep the original positional-CN syntax working. */
+                subject.common_name = argv[i];
+                continue;
+            } else {
+                usage(stderr);
+                return 2;
+            }
+            if (i + 1 >= argc || argv[i + 1][0] == '-') {
+                usage(stderr);
+                return 2;
+            }
+            *dst = argv[++i];
+        }
+        if (!subject.common_name) {
+            fail("--common-name is required for CSR creation");
+            return 2;
+        }
+        if (pkg_create_csr(argv[2], argv[3], &subject, err, sizeof(err)) != 0) {
             fail(err);
             return 1;
         }

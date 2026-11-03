@@ -19,10 +19,17 @@ openssl genpkey -algorithm RSA -aes-256-cbc \
   -pkeyopt rsa_keygen_bits:3072 -out company-private.pem
 ```
 
-Create a CSR using `urdev` (OpenSSL will prompt for the private-key passphrase if the key is encrypted):
+Create a CSR using `urdev` (OpenSSL will prompt for the private-key passphrase if the key is encrypted). The subject is descriptive metadata; it does not grant trust:
 
 ```sh
-urdev csr company-private.pem company.csr "Company Publisher"
+urdev csr company-private.pem company.csr \
+  --country US \
+  --state California \
+  --locality San Francisco \
+  --organization "Example Company" \
+  --organizational-unit "Desktop Apps" \
+  --common-name "Example Publisher" \
+  --email developer@example.com
 openssl req -in company.csr -verify -noout
 ```
 
@@ -40,6 +47,36 @@ urdev pack ./my-app my-app.zip \
 ```
 
 The private key is not copied into the ZIP. The first PEM certificate in the chain must correspond to the supplied private key.
+
+### Directly issued by the trusted root
+
+An intermediate CA is optional. For a small development installation, the
+trusted Urados root can issue the publisher leaf directly. The package still
+must contain the **leaf** certificate, not the root certificate:
+
+```ini
+# publisher-ext.cnf
+basicConstraints = critical,CA:FALSE
+keyUsage = critical,digitalSignature
+extendedKeyUsage = codeSigning
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid,issuer
+```
+
+```sh
+openssl x509 -req -in company.csr \
+  -CA urados-root.crt -CAkey urados-root.key -CAcreateserial \
+  -out company-signing.crt -days 180 -sha256 \
+  -extfile publisher-ext.cnf
+
+urdev pack ./my-app my-app.zip \
+  --key company-private.pem --cert company-signing.crt
+```
+
+Install only `urados-root.crt` on the device. Do not install or distribute
+`urados-root.key`. `urdev pack` correctly rejects the root certificate itself:
+the root is a trust anchor and is allowed to sign publisher leaves, but it is
+not allowed to sign packages directly as a CA certificate.
 
 ## CA operator workflow
 

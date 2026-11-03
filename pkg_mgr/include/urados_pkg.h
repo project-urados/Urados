@@ -93,6 +93,16 @@ typedef struct {
 } pkg_manifest;
 
 typedef struct {
+    const char *country;
+    const char *state;
+    const char *locality;
+    const char *organization;
+    const char *organizational_unit;
+    const char *common_name;
+    const char *email;
+} pkg_cert_subject;
+
+typedef struct {
     char *name;          /* zip entry name, owned by pkg_verified */
     char hex[65];        /* sha256 of the file contents */
 } pkg_digest;
@@ -153,8 +163,8 @@ int  pkg_verify_certificate_signature(const unsigned char *chain, size_t chainle
                                       const unsigned char *data, size_t datalen,
                                       const unsigned char *sig, size_t siglen,
                                       char *err, size_t errlen);
-int  pkg_create_csr(const char *keypath, const char *csrpath, const char *common_name,
-                    char *err, size_t errlen);
+int  pkg_create_csr(const char *keypath, const char *csrpath,
+                    const pkg_cert_subject *subject, char *err, size_t errlen);
 
 /* archive.c */
 int  pkg_verify(const char *zip_path, const char *keys_dir, pkg_verified *v,

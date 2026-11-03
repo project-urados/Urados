@@ -36,8 +36,13 @@ openssl x509 -req -in "$T/intermediate.csr" -CA "$T/root.crt" -CAkey "$T/root.ke
     -CAcreateserial -out "$T/intermediate.crt" -days 1000 -sha256 \
     -extfile "$T/intermediate.ext" >/dev/null 2>&1
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$T/publisher.key" >/dev/null 2>&1
-expect_ok "urdev creates publisher CSR" "$B/urdev" csr "$T/publisher.key" "$T/publisher.csr" "Test Publisher"
+expect_ok "urdev creates publisher CSR with full subject" "$B/urdev" csr "$T/publisher.key" "$T/publisher.csr" \
+    --country US --state California --locality "San Francisco" \
+    --organization "Urados Test" --organizational-unit "Publishers" \
+    --common-name "Test Publisher" --email publisher@example.test
 expect_ok "publisher CSR self-signature verifies" openssl req -in "$T/publisher.csr" -verify -noout
+expect_ok "publisher CSR contains requested subject" sh -c \
+    "openssl req -in '$T/publisher.csr' -noout -subject | grep -F 'CN = Test Publisher' | grep -F 'O = Urados Test'"
 cat > "$T/codesign.ext" <<'EOF'
 basicConstraints=critical,CA:FALSE
 keyUsage=critical,digitalSignature
