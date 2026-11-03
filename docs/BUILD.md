@@ -4,14 +4,14 @@ Urados is a native C project. The compiler needs the development headers and
 `pkg-config` metadata for libxml2, libzip, libcurl, OpenSSL, libselinux,
 libsemanage, and libacl. Runtime libraries alone are not enough.
 
-## Debian or Ubuntu
+## Debian 13/Trixie, including ChromeOS Crostini
 
 ```sh
 sudo apt update
 sudo apt install \
   build-essential pkg-config \
   libxml2-dev libzip-dev libcurl4-openssl-dev libssl-dev \
-  libselinux1-dev libsemanage1-dev libacl1-dev
+  libselinux1-dev libsemanage-dev libacl1-dev
 ```
 
 Then build with:
@@ -23,6 +23,22 @@ make -j2
 The build checks all `pkg-config` dependencies before compiling. If a package
 is missing, it prints the missing dependency and points back to this file
 instead of starting parallel compiler jobs with incomplete flags.
+
+## Ubuntu
+
+On older Ubuntu releases, the SELinux management development package is named
+`libsemanage1-dev`:
+
+```sh
+sudo apt update
+sudo apt install \
+  build-essential pkg-config \
+  libxml2-dev libzip-dev libcurl4-openssl-dev libssl-dev \
+  libselinux1-dev libsemanage1-dev libacl1-dev
+```
+
+If `libsemanage1-dev` is not available on a newer Ubuntu release, use
+`libsemanage-dev` instead.
 
 ## Fedora or RHEL-like systems
 
