@@ -2,3 +2,6 @@ selinux/build/
 .test-tmp/
 __pycache__/
 pkg_mgr/build/
+
+# Local device and test logs
+*.log

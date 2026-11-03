@@ -97,7 +97,10 @@ static int fetch_url(const char *url, int fd, size_t max, char *err, size_t errl
     curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(c, CURLOPT_MAXREDIRS, 5L);
     curl_easy_setopt(c, CURLOPT_PROTOCOLS_STR, "http,https");
-    curl_easy_setopt(c, CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
+    /* A signed package cannot be forged by a downgrade, but allowing an
+     * HTTPS URL to redirect to HTTP leaks the download and invites tampering
+     * or denial of service. Keep redirects on HTTPS. */
+    curl_easy_setopt(c, CURLOPT_REDIR_PROTOCOLS_STR, "https");
     curl_easy_setopt(c, CURLOPT_FAILONERROR, 1L);
     curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 15L);
     curl_easy_setopt(c, CURLOPT_TIMEOUT, 600L);

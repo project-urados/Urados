@@ -2,7 +2,7 @@
  * selinux.c - SELinux registration for app accounts (libsemanage).
  *
  * Each app <name> gets:
- *   - an SELinux user "<name>_u" (prefix user, role user_r, range s0), and
+ *   - an SELinux user "<name>_u" (prefix user, role urados_app_r, range s0), and
  *   - a Linux login mapping "<name>" -> "<name>_u".
  *
  * Both are local customisations of the policy store, so they survive policy

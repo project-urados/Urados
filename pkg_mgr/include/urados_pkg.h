@@ -171,8 +171,6 @@ int  pkg_manifest_parse(const unsigned char *buf, size_t len, pkg_manifest *m,
 int  pkg_run(char *const argv[]);
 int  pkg_rm_entry_at(int dirfd, const char *name, int depth);
 int  pkg_open_subdir(int dirfd, const char *name, mode_t mode, uid_t uid, gid_t gid);
-int  pkg_set_immutable_fd(int fd, int on);
-int  pkg_get_immutable_fd(int fd);
 int  pkg_lookup_passwd(const char *root, const char *name, uid_t *uid, gid_t *gid);
 int  pkg_lookup_group(const char *root, const char *name, gid_t *gid);
 int  pkg_set_app_uid_acl(int fd, uid_t app_uid, int app_read);

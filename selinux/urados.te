@@ -41,6 +41,7 @@ type urados_user_t;
 type urados_app_t;
 type urados_launcher_t;
 type urados_launcher_exec_t;
+type urados_root_exec_t;
 
 type urados_bin_user_t;
 type urados_app_prog_t;
@@ -55,11 +56,15 @@ type urados_lib_link_t;
 type urados_ipc_t;
 
 typeattribute urados_root_t domain;
+typeattribute urados_user_t domain;
+typeattribute urados_app_t domain;
+typeattribute urados_launcher_t domain;
 typeattribute urados_bin_user_t file_type;
 typeattribute urados_app_prog_t file_type;
 typeattribute urados_path_dir_t file_type;
 typeattribute urados_lib_t file_type;
 typeattribute urados_lib_link_t file_type;
+typeattribute urados_root_exec_t file_type;
 
 ########################################
 # Roles and launch transitions

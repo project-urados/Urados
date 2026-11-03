@@ -7,7 +7,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -138,10 +137,12 @@ int main(int argc, char **argv)
         fprintf(stderr, "urapp-runner: failed to irreversibly drop root identity\n");
         return 125;
     }
-    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) {
-        fprintf(stderr, "urapp-runner: cannot set no_new_privs: %s\n", strerror(errno));
-        return 125;
-    }
+    /* Do not set no_new_privs before this exec. On kernels whose SELinux
+     * nnp_nosuid_transition policy capability is disabled, that flag turns
+     * the launcher -> app domain transition into a bounded-transition check,
+     * and a correctly more-restricted app domain is not bounded by the
+     * launcher. The UID/GID drop above is irreversible, and SELinux denies
+     * app execution of all non-cache/non-utility file types. */
     if (chdir(home) != 0) {
         fprintf(stderr, "urapp-runner: cannot enter app data home: %s\n", strerror(errno));
         return 125;

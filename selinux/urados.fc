@@ -13,6 +13,10 @@
 /urados/bin/user(/.*)?                       system_u:object_r:urados_bin_user_t:s0
 /data/app_progs(/.*)?                        system_u:object_r:urados_app_prog_t:s0
 /urados/bin/urapp-runner                     system_u:object_r:urados_launcher_exec_t:s0
+# Administrative tools are intended to run from the Urados root domain.
+# Custom installation prefixes need an equivalent device policy rule.
+/usr/local/bin/(urpkg|urdev|apprestorecon)    system_u:object_r:urados_root_exec_t:s0
+/usr/bin/(urpkg|urdev|apprestorecon)          system_u:object_r:urados_root_exec_t:s0
 
 # Shared objects for restricted domains. Only /urados/lib* is an allowed
 # shared-library location for Urados apps and users.

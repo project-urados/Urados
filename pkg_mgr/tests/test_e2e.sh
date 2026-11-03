@@ -42,10 +42,6 @@ sudo -n true
 command -v getfacl >/dev/null 2>&1 || { echo "E2E tests require getfacl (acl package)" >&2; exit 1; }
 
 echo "== prepare"
-# A previous test run may have left an old immutable cache in the staging root.
-if [ -d "$ROOT/data/app" ]; then
-    sudo -n find "$ROOT/data/app" -name system_cache -type d -exec python3 "$HERE/tests/lockflag.py" clear {} \;
-fi
 # A failed run may have left the staged SELinux store locked; unlock it.
 if [ -d "$ROOT/var/lib/selinux/default/active" ]; then
     sudo -n python3 "$HERE/tests/lockflag.py" clear "$ROOT/var/lib/selinux/default/active"

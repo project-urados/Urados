@@ -117,6 +117,11 @@ if [ "$INSTALL_POLICY" -eq 1 ]; then
     semodule -i "$ROOT/selinux/build/urados.pp"
     printf '%s\n' '== Restoring Urados labels'
     restorecon -F "$RUNNER_DIR/urapp-runner"
+    for tool in urpkg urdev apprestorecon; do
+        if [ -e "$BIN_DIR/$tool" ]; then
+            restorecon -F "$BIN_DIR/$tool"
+        fi
+    done
     if [ -d /data/app ]; then
         restorecon -RF /data/app
     fi
