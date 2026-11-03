@@ -1,0 +1,23 @@
+# File contexts for Urados confinement.
+# Apply with: setfiles -F /etc/selinux/<policy>/contexts/files/file_contexts /
+# Note: these are regexes matched against absolute paths.
+
+/data/app(/.*)?              system_u:object_r:urados_app_data_t:s0
+/urados/bin/user(/.*)?       system_u:object_r:urados_bin_user_t:s0
+/data/app_progs(/.*)?         system_u:object_r:urados_app_prog_t:s0
+
+# Shared objects for user domains. Only /urados/lib* is a library location
+# for restricted domains.
+/urados/lib[^/]*(/.*)?       system_u:object_r:urados_lib_t:s0
+
+# /lib* symlinks (symlinks ONLY, -l) that point to /urados/lib*. The target
+# is what gets checked for execute/map, so a link to anything else is denied.
+/lib[^/]*                    -l    system_u:object_r:urados_lib_link_t:s0
+
+# IPC rundir for group 'users' (rule 6). Everything below is urados_ipc_t.
+/run/ipc/user(/.*)?          system_u:object_r:urados_ipc_t:s0
+
+# Traversal-only directories on the path to the above.
+/data                        system_u:object_r:urados_path_dir_t:s0
+/urados/bin                  system_u:object_r:urados_path_dir_t:s0
+/run/ipc                     system_u:object_r:urados_path_dir_t:s0
