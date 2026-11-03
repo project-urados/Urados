@@ -67,6 +67,14 @@
 #define PKG_ZIP_APP_PREFIX "app/"             /* payload prefix inside the zip */
 #define PKG_ENTRY_PREFIX   "system_cache/app/"/* manifest <entry> prefix */
 
+/* SELinux: each app account <name> gets SELinux user "<name>_u", and the Linux
+ * login <name> is mapped to it. */
+#define PKG_SEL_SUFFIX   "_u"
+#define PKG_SEL_USER_MAX (PKG_NAME_MAX + 3)   /* "<name>_u" plus NUL */
+#define PKG_SEL_PREFIX   "user"
+#define PKG_SEL_ROLE     "user_r"
+#define PKG_SEL_RANGE    "s0"
+
 typedef struct {
     char name[PKG_NAME_MAX + 1];
     char version[PKG_VERSION_MAX + 1];
@@ -93,6 +101,19 @@ typedef struct {
     const char *root;      /* "" for the device, or an absolute staging prefix */
     const char *keys_dir;  /* directory of trusted *.pem Ed25519 public keys */
 } pkg_opts;
+
+/* Current SELinux state of an app (pkg_sel_query). */
+typedef struct {
+    int  user_exists;                    /* "<name>_u" is defined in the policy */
+    int  login_exists;                   /* a login mapping for <name> is defined */
+    char login_sename[PKG_SEL_USER_MAX]; /* the SELinux user the mapping points at */
+} pkg_sel_status;
+
+/* What pkg_sel_register added, so that pkg_sel_unregister can undo it. */
+typedef struct {
+    int user_added;
+    int login_added;
+} pkg_sel_state;
 
 /* common.c */
 void pkg_seterr(char *err, size_t errlen, const char *fmt, ...)
@@ -139,10 +160,21 @@ int  pkg_run(char *const argv[]);
 int  pkg_rm_entry_at(int dirfd, const char *name, int depth);
 int  pkg_open_subdir(int dirfd, const char *name, mode_t mode, uid_t uid, gid_t gid);
 int  pkg_set_immutable_fd(int fd, int on);
+int  pkg_get_immutable_fd(int fd);
 int  pkg_lookup_passwd(const char *root, const char *name, uid_t *uid, gid_t *gid);
 int  pkg_lookup_group(const char *root, const char *name, gid_t *gid);
 int  pkg_supp_groups(const char *root, const char *user, gid_t primary,
                      gid_t *out, size_t max, size_t *n);
+
+/* selinux.c (libsemanage: SELinux user and login mapping for each app) */
+int  pkg_sel_policy(const char *root, char *out, size_t outlen);
+int  pkg_sel_name(const char *app, char *out, size_t outlen);
+int  pkg_sel_query(const pkg_opts *o, const char *app, pkg_sel_status *st,
+                   char *err, size_t errlen);
+int  pkg_sel_register(const pkg_opts *o, const char *app, pkg_sel_state *st,
+                      char *err, size_t errlen);
+int  pkg_sel_unregister(const pkg_opts *o, const char *app, const pkg_sel_state *st,
+                        char *err, size_t errlen);
 
 /* fetch.c */
 int  pkg_fetch(const char *src, int fd, size_t max, char *err, size_t errlen);
