@@ -97,11 +97,18 @@ expect_fail "urdev rejects non-PEM trailing chain data" "$B/urdev" pack "$T/app"
 } > "$T/too-many-chain.pem"
 expect_fail "urdev rejects chains longer than 16 certificates" "$B/urdev" pack "$T/app" "$T/long-chain.zip" --key "$T/publisher.key" --cert "$T/too-many-chain.pem"
 
-# Confirm existing raw Ed25519 key packages continue to work during migration.
+# Package signers and trust anchors are always full X.509 certificates.
 "$B/urdev" keygen "$T/legacy.key" "$T/legacy.pub" --no-passphrase >/dev/null
-cp "$T/legacy.pub" "$T/trusted/legacy.pem"
-expect_ok "legacy package can still be packed" "$B/urdev" pack "$T/app" "$T/legacy.zip" --key "$T/legacy.key"
-expect_ok "legacy raw-key package remains verifiable" "$B/urpkg" --keys "$T/trusted" verify "$T/legacy.zip"
+expect_fail "urdev refuses to pack without a complete signer certificate chain" \
+    "$B/urdev" pack "$T/app" "$T/no-certificate.zip" --key "$T/legacy.key"
+cp "$T/legacy.pub" "$T/trusted/raw-public-key.pem"
+expect_fail "raw public keys are rejected from the X.509 trust directory" \
+    "$B/urpkg" --keys "$T/trusted" verify "$T/certified.zip"
+rm "$T/trusted/raw-public-key.pem"
+cp "$T/certified.zip" "$T/no-signer-certificate.zip"
+zip -q -d "$T/no-signer-certificate.zip" SIGNER_CERTS.pem
+expect_fail "packages without embedded signer certificates are rejected" \
+    "$B/urpkg" --keys "$T/trusted" verify "$T/no-signer-certificate.zip"
 
 # A code-signing certificate may not be repurposed from a TLS-only certificate.
 sed 's/extendedKeyUsage=codeSigning/extendedKeyUsage=serverAuth/' "$T/codesign.ext" > "$T/tls.ext"

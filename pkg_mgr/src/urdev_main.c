@@ -6,7 +6,7 @@
  *   urdev keygen <private.pem> <public.pem> [--no-passphrase]
  *                                                create an Ed25519 signing key
  *   urdev csr    <private.pem> <request.csr> <CN> create a certificate request
- *   urdev pack   <dir> <out.zip> [--key FILE] [--cert CHAIN.pem]
+ *   urdev pack   <dir> <out.zip> --key FILE --cert CHAIN.pem
  *
  * pack asks for the signing key path when --key is not given. OpenSSL asks for
  * the key's passphrase on the terminal when the key is encrypted.
@@ -26,7 +26,7 @@ static void usage(FILE *f)
           "  urdev check  <dir>\n"
           "  urdev keygen <private.pem> <public.pem> [--no-passphrase]\n"
           "  urdev csr    <private.pem> <request.csr> <common-name>\n"
-          "  urdev pack   <dir> <out.zip> [--key FILE] [--cert CHAIN.pem]\n",
+          "  urdev pack   <dir> <out.zip> --key FILE --cert CHAIN.pem\n",
           f);
 }
 
@@ -147,6 +147,10 @@ int main(int argc, char **argv)
                 return 2;
             }
         }
+        if (!certarg) {
+            fail("a publisher certificate chain is required (use --cert CHAIN.pem)");
+            return 2;
+        }
         if (!keyarg) {
             if (prompt_key(keypath, sizeof(keypath)) != 0) {
                 fail("no signing key given (use --key FILE)");
@@ -162,7 +166,7 @@ int main(int argc, char **argv)
             fail(err);
             goto done;
         }
-        printf("packed %s%s\n", argv[3], certarg ? " with certificate chain" : "");
+        printf("packed %s with certificate chain\n", argv[3]);
         rc = 0;
         goto done;
     }

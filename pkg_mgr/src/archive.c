@@ -8,7 +8,7 @@
  *      encrypted entries, duplicate names and oversized files.
  *   2. Hash every accepted file (streaming, size-limited).
  *   3. Build the digest text (see urados_pkg.h) and check SIGNATURE against
- *      either its signer chain and trusted roots or the legacy keys.
+ *      its signer chain to administrator-installed root certificates.
  *   4. Only then parse manifest.xml and check that its <entry> is a signed
  *      payload file.
  *
@@ -18,6 +18,7 @@
  */
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,11 +35,25 @@
 
 static zip_t *open_zip(const char *path, char *err, size_t errlen)
 {
+    static const char fd_prefix[] = "/proc/self/fd/";
     int ec = 0;
     struct stat st;
     zip_t *z;
+    int stat_rc;
 
-    if (lstat(path, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0 ||
+    if (strncmp(path, fd_prefix, sizeof(fd_prefix) - 1) == 0) {
+        char *end = NULL;
+        long fdno;
+        const char *num = path + sizeof(fd_prefix) - 1;
+
+        errno = 0;
+        fdno = strtol(num, &end, 10);
+        stat_rc = (errno == 0 && end != num && *end == '\0' && fdno >= 0 && fdno <= INT_MAX)
+                      ? fstat((int)fdno, &st) : -1;
+    } else {
+        stat_rc = lstat(path, &st);
+    }
+    if (stat_rc != 0 || !S_ISREG(st.st_mode) || st.st_size < 0 ||
         (uint64_t)st.st_size > PKG_ARCHIVE_MAX) {
         pkg_seterr(err, errlen, "package %s is not a regular file or exceeds the %u-byte archive limit",
                    path, PKG_ARCHIVE_MAX);
@@ -193,9 +208,8 @@ void pkg_verified_free(pkg_verified *v)
     memset(v, 0, sizeof(*v));
 }
 
-int pkg_verify_keys(const char *zip_path, EVP_PKEY **keys, size_t nkeys,
-                    const char *roots_dir,
-                    pkg_verified *v, char *err, size_t errlen)
+static int verify_certificate_package(const char *zip_path, const char *roots_dir,
+                                      pkg_verified *v, char *err, size_t errlen)
 {
     zip_t *z;
     zip_int64_t count;
@@ -287,9 +301,9 @@ int pkg_verify_keys(const char *zip_path, EVP_PKEY **keys, size_t nkeys,
         nd++;
     }
 
-    if (!have_sig || !have_manifest) {
-        pkg_seterr(err, errlen, "package must contain %s and %s",
-                   PKG_MANIFEST_FILE, PKG_SIGNATURE_FILE);
+    if (!have_sig || !have_manifest || !have_cert_chain) {
+        pkg_seterr(err, errlen, "package must contain %s, %s and %s",
+                   PKG_MANIFEST_FILE, PKG_SIGNATURE_FILE, PKG_SIGNER_CERTS_FILE);
         goto out;
     }
     if (nd < 2) {
@@ -308,15 +322,9 @@ int pkg_verify_keys(const char *zip_path, EVP_PKEY **keys, size_t nkeys,
         pkg_seterr(err, errlen, "out of memory");
         goto out;
     }
-    if (have_cert_chain) {
-        if (!roots_dir || pkg_verify_certificate_signature(cert_chain, cert_chain_len,
-                roots_dir, dtext, dlen, sig, siglen, err, errlen) != 0)
-            goto out;
-    } else if (!keys || nkeys == 0 ||
-               pkg_check_signature(keys, nkeys, dtext, dlen, sig, siglen) != 0) {
-        pkg_seterr(err, errlen, "signature verification failed (untrusted or modified package)");
+    if (!roots_dir || pkg_verify_certificate_signature(cert_chain, cert_chain_len,
+            roots_dir, dtext, dlen, sig, siglen, err, errlen) != 0)
         goto out;
-    }
 
     /* The signature is good, so the manifest is authentic and can be parsed. */
     if (pkg_manifest_parse(mbuf, mlen, &v->manifest, err, errlen) != 0)
@@ -357,22 +365,14 @@ out:
 int pkg_verify(const char *zip_path, const char *keys_dir, pkg_verified *v,
                char *err, size_t errlen)
 {
-    EVP_PKEY **keys = NULL;
-    size_t nkeys = 0;
-    int rc;
-
-    if (pkg_load_trusted_keys(keys_dir, &keys, &nkeys, err, errlen) != 0)
-        return -1;
-    rc = pkg_verify_keys(zip_path, keys, nkeys, keys_dir, v, err, errlen);
-    pkg_free_keys(keys, nkeys);
-    return rc;
+    return verify_certificate_package(zip_path, keys_dir, v, err, errlen);
 }
 
 /*
- * Extracts every app/ payload into appfd (the empty system_cache/app dir).
- * Directories and non-entry files are root:gid 0110 (traverse and execute
- * only). The entry point is root:gid 0550 so scripts can be read and run.
- * Every byte is re-hashed against the signed digest as it is written.
+ * Extracts every app/ payload into the writable system_cache/app code tree.
+ * Root owns installed files; inherited POSIX ACLs grant read/write/execute only
+ * to the owning app UID while the global users group has no access. Every byte
+ * is re-hashed against the signed digest as it is written.
  */
 int pkg_extract(const char *zip_path, int appfd, gid_t gid, const pkg_verified *v,
                 char *err, size_t errlen)
@@ -436,7 +436,7 @@ int pkg_extract(const char *zip_path, int appfd, gid_t gid, const pkg_verified *
             if (!next)
                 break; /* tok is the final file name */
             {
-                int nfd = pkg_open_subdir(cur, tok, 0110, 0, gid);
+                int nfd = pkg_open_subdir(cur, tok, 02770, 0, gid);
 
                 close(cur);
                 if (nfd < 0) {
@@ -448,9 +448,9 @@ int pkg_extract(const char *zip_path, int appfd, gid_t gid, const pkg_verified *
             }
             tok = next;
         }
-        /* The entry point is readable and executable so that scripts can run.
-     * Every other file and every directory is execute-only (0110). */
-    fmode = (strcmp(d->name, entry_zip) == 0) ? 0550 : 0110;
+        /* Code is mutable and executable by this app only; SELinux separately
+         * forbids execution from the ordinary data tree. */
+        fmode = 0770;
 
         ffd = openat(cur, tok, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
         close(cur);

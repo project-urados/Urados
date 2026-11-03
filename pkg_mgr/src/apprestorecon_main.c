@@ -16,18 +16,16 @@
  *      rules restorecon uses. The rules are matched against device paths, so
  *      /data/app/<name>/... is labelled the same in a staging root.
  *
- * system_cache is immutable (chattr +i), so it is unlocked only for the
- * relabel and locked again afterwards, even when the relabel fails.
- *
- * Safety. Apps own their data tree, so nothing in it is trusted:
+ * Safety. The per-app parent is root-owned, but system_cache is app-writable;
+ * nothing in the tree below it is trusted:
  *   - every directory is opened with O_NOFOLLOW, and every other entry with
  *     O_PATH|O_NOFOLLOW. A symlink is never followed and never relabelled;
  *   - labels are read and written through /proc/self/fd/N, which names the
  *     inode already opened, so a rename or swap after the open does not move
  *     the write somewhere else;
  *   - mount points are not crossed (device must match the app directory);
- *   - system_cache is opened before it is unlocked, so the unlock window
- *     cannot be used to point the walk at a different directory.
+ *   - traversal stays beneath the opened app directory and never follows
+ *     symlinks, so relabeling cannot be redirected outside the app tree.
  *
  * Exit status: 0 if every app was restored, 1 if anything failed.
  */
@@ -284,11 +282,11 @@ static int restore_mapping(const struct opts *o, const char *app, struct counts 
 
 /* Relabels the whole tree of one app. appdata_fd is /data/app (or its copy). */
 static int restore_labels(const struct opts *o, struct counts *c, int appdata_fd,
-                          const char *app, uid_t uid)
+                          const char *app)
 {
     char devapp[PKG_PATH_MAX];
     struct stat st;
-    int app_fd, cache_fd = -1, walk_fd = -1, locked = 0, rc = 0;
+    int app_fd, cache_fd = -1, walk_fd = -1, rc = 0;
 
     snprintf(devapp, sizeof(devapp), "%s/%s", PKG_APPDATA_DIR, app);
     app_fd = openat(appdata_fd, app, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
@@ -297,8 +295,8 @@ static int restore_labels(const struct opts *o, struct counts *c, int appdata_fd
         c->errors++;
         return -1;
     }
-    if (fstat(app_fd, &st) != 0 || st.st_uid != uid) {
-        errf("%s is not owned by app user '%s'; not relabelled", devapp, app);
+    if (fstat(app_fd, &st) != 0 || st.st_uid != 0) {
+        errf("%s is not root-owned; not relabelled", devapp);
         c->errors++;
         close(app_fd);
         return -1;
@@ -317,20 +315,11 @@ static int restore_labels(const struct opts *o, struct counts *c, int appdata_fd
         walk_fd = dup_fd;
     }
 
-    /* system_cache: open it before unlocking, so the fd names this inode. */
+    /* system_cache is mutable, but it is beneath the root-owned parent. */
     cache_fd = openat(app_fd, APP_CACHE_NAME, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (cache_fd < 0) {
         errf("cannot open %s/%s: %s", devapp, APP_CACHE_NAME, strerror(errno));
         c->errors++;
-        rc = -1;
-        goto out;
-    }
-    locked = pkg_get_immutable_fd(cache_fd) == 1;
-    if (locked && !o->dry_run && pkg_set_immutable_fd(cache_fd, 0) != 0) {
-        errf("cannot unlock %s/%s: %s", devapp, APP_CACHE_NAME, strerror(errno));
-        c->errors++;
-        close(cache_fd);
-        cache_fd = -1;
         rc = -1;
         goto out;
     }
@@ -351,12 +340,6 @@ static int restore_labels(const struct opts *o, struct counts *c, int appdata_fd
             c->errors++;
         }
     }
-    if (locked && !o->dry_run && pkg_set_immutable_fd(cache_fd, 1) != 0) {
-        errf("cannot lock %s/%s again: %s", devapp, APP_CACHE_NAME, strerror(errno));
-        c->errors++;
-        rc = -1;
-    }
-
     /* The rest of the app's tree, excluding system_cache (already done). */
     {
         DIR *d;
@@ -407,7 +390,7 @@ static int restore_app(const struct opts *o, int appdata_fd, const char *app, st
     }
     if (restore_mapping(o, app, c) != 0)
         rc = -1;
-    if (restore_labels(o, c, appdata_fd, app, uid) != 0)
+    if (restore_labels(o, c, appdata_fd, app) != 0)
         rc = -1;
     printf("  labels: checked %lu, %s %lu, no rule %lu, skipped %lu, errors %lu\n",
            c->checked - before.checked,

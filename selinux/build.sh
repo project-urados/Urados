@@ -13,12 +13,12 @@ usage() {
     cat <<'EOF'
 Usage: ./build-install.sh [options]
 
-Build urpkg and urdev, compile the SELinux policy, and install the tools.
+Build urpkg, urdev, apprestorecon, and the confined runner; compile the SELinux policy.
 
 Options:
   --prefix DIR       Installation prefix (default: /usr/local; tools go in DIR/bin)
   --destdir DIR      Stage installation under DIR, e.g. for package creation
-  --binaries-only    Build/install urpkg and urdev without compiling SELinux policy
+  --binaries-only    Build/install all tools and the confined app runner without compiling policy
   --install-policy   Load selinux/build/urados.pp with semodule after building
   -h, --help         Show this help
 
@@ -26,7 +26,8 @@ The SELinux policy is compiled by default, but is not loaded unless
 --install-policy is supplied. Loading it changes the active policy on this
 machine and requires root. The Urados policy also expects device-specific base
 policy declarations described in selinux/base/users.conf; do not load it on a
-stock host policy unless that policy has been prepared for Urados.
+stock host policy unless that policy has been prepared for Urados. The confined
+runner is always installed to /urados/bin/urapp-runner.
 
 Examples:
   ./build-install.sh
@@ -77,8 +78,11 @@ for tool in make cc pkg-config install; do
     command -v "$tool" >/dev/null 2>&1 || fail "required command not found: $tool"
 done
 
-if ! pkg-config --exists libxml-2.0 libzip libcurl libcrypto; then
-    fail "missing C development dependencies (libxml2, libzip, libcurl, OpenSSL); install their development packages"
+if ! pkg-config --exists libxml-2.0 libzip libcurl libcrypto libselinux libsemanage libacl; then
+    fail "missing C development dependencies (libxml2, libzip, libcurl, OpenSSL, libselinux, libsemanage, libacl); install their development packages"
+fi
+if [ "$INSTALL_POLICY" -eq 1 ]; then
+    command -v restorecon >/dev/null 2>&1 || fail "--install-policy requires restorecon to label the runner and app tree"
 fi
 
 printf '%s\n' '== Building Urados command-line tools'
@@ -98,11 +102,24 @@ fi
 mkdir -p "$BIN_DIR" || fail "cannot create installation directory: $BIN_DIR"
 install -m 0755 "$ROOT/pkg_mgr/build/urpkg" "$BIN_DIR/urpkg"
 install -m 0755 "$ROOT/pkg_mgr/build/urdev" "$BIN_DIR/urdev"
-printf 'Installed urpkg and urdev to %s\n' "$BIN_DIR"
+install -m 0755 "$ROOT/pkg_mgr/build/apprestorecon" "$BIN_DIR/apprestorecon"
+if [ -n "$DESTDIR" ]; then
+    RUNNER_DIR=${DESTDIR%/}/urados/bin
+else
+    RUNNER_DIR=/urados/bin
+fi
+mkdir -p "$RUNNER_DIR" || fail "cannot create runner directory: $RUNNER_DIR"
+install -m 0755 "$ROOT/pkg_mgr/build/urapp-runner" "$RUNNER_DIR/urapp-runner"
+printf 'Installed urpkg, urdev, apprestorecon to %s; runner to %s\n' "$BIN_DIR" "$RUNNER_DIR"
 
 if [ "$INSTALL_POLICY" -eq 1 ]; then
     printf '%s\n' '== Loading SELinux module urados.pp'
     semodule -i "$ROOT/selinux/build/urados.pp"
+    printf '%s\n' '== Restoring Urados labels'
+    restorecon -F "$RUNNER_DIR/urapp-runner"
+    if [ -d /data/app ]; then
+        restorecon -RF /data/app
+    fi
 fi
 
 if [ "$BUILD_POLICY" -eq 1 ]; then

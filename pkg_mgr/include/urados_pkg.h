@@ -7,7 +7,7 @@
  * Package format: a zip archive containing
  *   manifest.xml   XML manifest (schema in src/manifest.c)
  *   SIGNATURE      signature over the digest text
- *   SIGNER_CERTS   optional PEM leaf/intermediate X.509 chain
+ *   SIGNER_CERTS   required PEM leaf/intermediate X.509 chain
  *   app/<rel>      payload files, installed as system_cache/app/<rel>
  *
  * Digest text: one line per archive file except SIGNATURE (manifest.xml is
@@ -18,21 +18,20 @@
  *
  * Installed layout (every device path is prefixed by --root when one is given):
  *   /data/app_progs/                        root:root 0700   root only
+ *   /data/app_progs/.locks/                 root:root 0700   install/start serialization
  *   /data/app_progs/.staging/               root:root 0700   install staging
- *   /data/app_progs/<name>/                 root:root 0700
- *   /data/app_progs/<name>/package.zip      root:root 0600   trusted copy
+ *   /data/app_progs/<name>.zip              root:root 0600   trusted package
  *   /data/app/                              root:root 0711   traverse only
- *   /data/app/<name>/                       <name>:users 0700 app data
- *   /data/app/<name>/system_cache/          root:root 0711, immutable (chattr +i)
- *       The app owns the parent, so the immutable flag is what stops it from
- *       renaming or deleting this folder. Only root can clear the flag.
- *   /data/app/<name>/system_cache/app/      root:<name> 0110  app: traverse only
- *       directories and payload files are 0110: the app cannot list, read,
- *       write or rename anything here. The entry point is 0550 so that
- *       scripts can be read and run; it is the only file the app can read.
+ *   /data/app/<name>/                       root:users 0710, parent protected
+ *   /data/app/<name>/data/                  root:users 0770 + per-UID ACL, non-executable data
+ *   /data/app/<name>/system_cache/          root:users 2730 + per-UID ACL, app WX
+ *   /data/app/<name>/system_cache/app/      root:users 2770 + per-UID ACL
+ *   /data/app/<name>/system_cache/user/     root:users 2770 + per-UID ACL
  *
- * <name> is a private group: only the app user is a member, so one app cannot
- * read another app's code. The app user's primary group is 'users'.
+ * Every app user has the single shared primary group 'users'. POSIX ACLs grant
+ * access to each app's data home and cache only to its UID; shared group entries
+ * have no permissions. Root owns the data-home directory so an app cannot
+ * chmod it to expose files to other members of 'users'.
  */
 #ifndef URADOS_PKG_H
 #define URADOS_PKG_H
@@ -61,14 +60,18 @@
 #define PKG_MANIFEST_FILE  "manifest.xml"
 #define PKG_SIGNATURE_FILE "SIGNATURE"
 #define PKG_SIGNER_CERTS_FILE "SIGNER_CERTS.pem"
-#define PKG_ARCHIVE_FILE   "package.zip"      /* name of the trusted copy */
-#define PKG_KEYS_SUBDIR    "/etc/urados/keys" /* trusted *.crt roots; legacy Ed25519 *.pem */
+#define PKG_ARCHIVE_SUFFIX ".zip"             /* trusted archive: <app-name>.zip */
+#define PKG_KEYS_SUBDIR    "/etc/urados/keys" /* administrator-installed X.509 CA roots */
 #define PKG_DATA_DIR       "/data"
 #define PKG_PROGS_DIR      "/data/app_progs"
 #define PKG_STAGING_DIR    ".staging"
 #define PKG_APPDATA_DIR    "/data/app"
+#define PKG_APP_DATA_SUBDIR "data"
 #define PKG_APP_GROUP      "users"            /* primary group of app users */
 #define PKG_CACHE_DIR      "system_cache"
+#define PKG_CACHE_USER_DIR "user"
+#define PKG_RUNNER_PATH    "/urados/bin/urapp-runner"
+#define PKG_USER_UTILS     "/urados/bin/user"
 #define PKG_ZIP_APP_PREFIX "app/"             /* payload prefix inside the zip */
 #define PKG_ENTRY_PREFIX   "system_cache/app/"/* manifest <entry> prefix */
 
@@ -77,7 +80,7 @@
 #define PKG_SEL_SUFFIX   "_u"
 #define PKG_SEL_USER_MAX (PKG_NAME_MAX + 3)   /* "<name>_u" plus NUL */
 #define PKG_SEL_PREFIX   "user"
-#define PKG_SEL_ROLE     "user_r"
+#define PKG_SEL_ROLE     "urados_app_r"
 #define PKG_SEL_RANGE    "s0"
 
 typedef struct {
@@ -104,7 +107,7 @@ typedef struct {
 /* Options shared by the urpkg commands. */
 typedef struct {
     const char *root;      /* "" for the device, or an absolute staging prefix */
-    const char *keys_dir;  /* trusted *.crt roots; legacy Ed25519 *.pem keys */
+    const char *keys_dir;  /* PEM-encoded trusted X.509 CA certificates */
 } pkg_opts;
 
 /* Current SELinux state of an app (pkg_sel_query). */
@@ -136,9 +139,6 @@ int  pkg_write_all(int fd, const void *buf, size_t len);
 char *pkg_join(const char *root, const char *path);
 
 /* crypto.c */
-void pkg_free_keys(EVP_PKEY **keys, size_t n);
-int  pkg_load_trusted_keys(const char *dir, EVP_PKEY ***keys, size_t *n,
-                           char *err, size_t errlen);
 int  pkg_check_signature(EVP_PKEY **keys, size_t n, const unsigned char *data,
                          size_t dlen, const unsigned char *sig, size_t slen);
 int  pkg_sign_data(EVP_PKEY *key, const unsigned char *data, size_t dlen,
@@ -159,8 +159,6 @@ int  pkg_create_csr(const char *keypath, const char *csrpath, const char *common
 /* archive.c */
 int  pkg_verify(const char *zip_path, const char *keys_dir, pkg_verified *v,
                 char *err, size_t errlen);
-int  pkg_verify_keys(const char *zip_path, EVP_PKEY **keys, size_t nkeys,
-                     const char *roots_dir, pkg_verified *v, char *err, size_t errlen);
 int  pkg_extract(const char *zip_path, int appfd, gid_t gid, const pkg_verified *v,
                  char *err, size_t errlen);
 void pkg_verified_free(pkg_verified *v);
@@ -177,8 +175,7 @@ int  pkg_set_immutable_fd(int fd, int on);
 int  pkg_get_immutable_fd(int fd);
 int  pkg_lookup_passwd(const char *root, const char *name, uid_t *uid, gid_t *gid);
 int  pkg_lookup_group(const char *root, const char *name, gid_t *gid);
-int  pkg_supp_groups(const char *root, const char *user, gid_t primary,
-                     gid_t *out, size_t max, size_t *n);
+int  pkg_set_app_uid_acl(int fd, uid_t app_uid, int app_read);
 
 /* selinux.c (libsemanage: SELinux user and login mapping for each app) */
 int  pkg_sel_policy(const char *root, char *out, size_t outlen);

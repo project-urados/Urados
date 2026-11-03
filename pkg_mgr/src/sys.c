@@ -8,10 +8,12 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <acl/libacl.h>
 #include <linux/fs.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/acl.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -20,6 +22,49 @@
 #include "urados_pkg.h"
 
 #define RM_MAX_DEPTH 64
+
+/*
+ * App data/cache directories are root-owned and belong to the shared 'users'
+ * group. The owning group ACL is deliberately empty; a named-user ACL grants
+ * access to just this app UID. Default entries carry the same isolation to
+ * descendants. app_read=0 is the top-level system_cache contract (app WX only);
+ * app_read=1 gives the app RWX for its data home or code subdirectories.
+ */
+int pkg_set_app_uid_acl(int fd, uid_t app_uid, int app_read)
+{
+    char access_text[160], default_text[160], procfd[64];
+    const char *app_perms = app_read ? "rwx" : "-wx";
+    acl_t access_acl = NULL, default_acl = NULL;
+    int rc = -1;
+
+    if (snprintf(access_text, sizeof(access_text),
+                 "u::rwx,u:%lu:%s,g::---,m::%s,o::---",
+                 (unsigned long)app_uid, app_perms, app_perms) >= (int)sizeof(access_text) ||
+        snprintf(default_text, sizeof(default_text),
+                 "u::rwx,u:%lu:rwx,g::---,m::rwx,o::---",
+                 (unsigned long)app_uid) >= (int)sizeof(default_text)) {
+        errno = EOVERFLOW;
+        return -1;
+    }
+    access_acl = acl_from_text(access_text);
+    default_acl = acl_from_text(default_text);
+    if (!access_acl || !default_acl || acl_valid(access_acl) != 0 ||
+        acl_valid(default_acl) != 0 || acl_set_fd(fd, access_acl) != 0)
+        goto out;
+    if (snprintf(procfd, sizeof(procfd), "/proc/self/fd/%d", fd) >= (int)sizeof(procfd)) {
+        errno = EOVERFLOW;
+        goto out;
+    }
+    if (acl_set_file(procfd, ACL_TYPE_DEFAULT, default_acl) != 0)
+        goto out;
+    rc = 0;
+out:
+    if (access_acl)
+        acl_free(access_acl);
+    if (default_acl)
+        acl_free(default_acl);
+    return rc;
+}
 
 int pkg_run(char *const argv[])
 {
@@ -163,62 +208,6 @@ int pkg_lookup_passwd(const char *root, const char *name, uid_t *uid, gid_t *gid
     }
     fclose(fp);
     return found;
-}
-
-/*
- * Collects the gids a user belongs to: the primary gid first, then every group
- * in <root>/etc/group that lists `user` as a member. Reads files only, so it
- * works before chroot and needs no NSS modules.
- */
-int pkg_supp_groups(const char *root, const char *user, gid_t primary,
-                    gid_t *out, size_t max, size_t *n)
-{
-    char *path = pkg_join(root, "/etc/group");
-    FILE *fp;
-    char line[2048];
-    int rc = 0;
-
-    *n = 0;
-    if (!path)
-        return -1;
-    fp = fopen(path, "r");
-    free(path);
-    if (!fp)
-        return -1;
-    if (max == 0)
-        goto out;
-    out[(*n)++] = primary;
-    while (fgets(line, sizeof(line), fp)) {
-        char *f[4], *p = line, *save = NULL, *tok;
-        int i;
-        unsigned long gid;
-
-        line[strcspn(line, "\n")] = '\0';
-        for (i = 0; i < 4 && p; i++) {
-            f[i] = p;
-            p = strchr(p, ':');
-            if (p)
-                *p++ = '\0';
-        }
-        if (i < 4)
-            continue;
-        gid = strtoul(f[2], NULL, 10);
-        if ((gid_t)gid == primary)
-            continue;
-        for (tok = strtok_r(f[3], ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
-            if (strcmp(tok, user) == 0) {
-                if (*n >= max) {
-                    rc = -1;
-                    goto out;
-                }
-                out[(*n)++] = (gid_t)gid;
-                break;
-            }
-        }
-    }
-out:
-    fclose(fp);
-    return rc;
 }
 
 /* Looks up a group entry in <root>/etc/group. Returns 0 if found. */

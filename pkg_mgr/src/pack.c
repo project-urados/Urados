@@ -257,7 +257,7 @@ int pkg_init_project(const char *dir, const char *name, const char *version,
         close(fd);
         return -1;
     }
-    fprintf(fp, "#!/bin/sh\necho \"hello from %s\"\n", name);
+    fprintf(fp, "#!/urados/bin/user/sh\necho \"hello from %s\"\n", name);
     return fclose(fp) == 0 ? 0 : -1;
 }
 
@@ -275,16 +275,17 @@ int pkg_pack(const char *dir, const char *out_zip, EVP_PKEY *key,
 
     if (pkg_check_project(dir, &m, err, errlen) != 0)
         return -1;
-
-    if (cert_chain_path) {
-        if (pkg_read_file(cert_chain_path, PKG_META_MAX, &cert_chain, &cert_chain_len) != 0) {
-            pkg_seterr(err, errlen, "cannot read signer certificate chain %s: %s",
-                       cert_chain_path, strerror(errno));
-            goto out;
-        }
-        if (pkg_validate_signer_certificate(cert_chain, cert_chain_len, key, err, errlen) != 0)
-            goto out;
+    if (!cert_chain_path) {
+        pkg_seterr(err, errlen, "a publisher certificate chain is required (--cert CHAIN.pem)");
+        goto out;
     }
+    if (pkg_read_file(cert_chain_path, PKG_META_MAX, &cert_chain, &cert_chain_len) != 0) {
+        pkg_seterr(err, errlen, "cannot read signer certificate chain %s: %s",
+                   cert_chain_path, strerror(errno));
+        goto out;
+    }
+    if (pkg_validate_signer_certificate(cert_chain, cert_chain_len, key, err, errlen) != 0)
+        goto out;
 
     snprintf(path, sizeof(path), "%s/%s", dir, PKG_MANIFEST_FILE);
     if (list_add(&l, PKG_MANIFEST_FILE, path, err, errlen) != 0)
@@ -294,7 +295,7 @@ int pkg_pack(const char *dir, const char *out_zip, EVP_PKEY *key,
         goto out;
 
     qsort(l.items, l.n, sizeof(*l.items), cmp_items);
-    ndigs = l.n + (cert_chain ? 1 : 0);
+    ndigs = l.n + 1;
     digs = malloc((ndigs ? ndigs : 1) * sizeof(*digs));
     if (!digs) {
         pkg_seterr(err, errlen, "out of memory");

@@ -2,22 +2,27 @@
 # Apply with: setfiles -F /etc/selinux/<policy>/contexts/files/file_contexts /
 # Note: these are regexes matched against absolute paths.
 
-/data/app(/.*)?              system_u:object_r:urados_app_data_t:s0
-/urados/bin/user(/.*)?       system_u:object_r:urados_bin_user_t:s0
-/data/app_progs(/.*)?         system_u:object_r:urados_app_prog_t:s0
+# Separate traversal-only roots, protected per-app parents, non-executable data,
+# and mutable executable code. Unix DAC uses the shared users group plus
+# per-app UID ACLs to prevent cross-app cache access.
+/data/app                              -d    system_u:object_r:urados_app_base_t:s0
+/data/app/[^/]+                        -d    system_u:object_r:urados_app_parent_t:s0
+/data/app/[^/]+/data                   -d    system_u:object_r:urados_app_home_t:s0
+/data/app/[^/]+/data/.+                       system_u:object_r:urados_app_data_t:s0
+/data/app/[^/]+/system_cache(/.*)?            system_u:object_r:urados_app_code_t:s0
+/urados/bin/user(/.*)?                       system_u:object_r:urados_bin_user_t:s0
+/data/app_progs(/.*)?                        system_u:object_r:urados_app_prog_t:s0
+/urados/bin/urapp-runner                     system_u:object_r:urados_launcher_exec_t:s0
 
-# Shared objects for user domains. Only /urados/lib* is a library location
-# for restricted domains.
-/urados/lib[^/]*(/.*)?       system_u:object_r:urados_lib_t:s0
+# Shared objects for restricted domains. Only /urados/lib* is an allowed
+# shared-library location for Urados apps and users.
+/urados/lib[^/]*(/.*)?                       system_u:object_r:urados_lib_t:s0
+/lib[^/]*                              -l    system_u:object_r:urados_lib_link_t:s0
 
-# /lib* symlinks (symlinks ONLY, -l) that point to /urados/lib*. The target
-# is what gets checked for execute/map, so a link to anything else is denied.
-/lib[^/]*                    -l    system_u:object_r:urados_lib_link_t:s0
-
-# IPC rundir for group 'users' (rule 6). Everything below is urados_ipc_t.
-/run/ipc/user(/.*)?          system_u:object_r:urados_ipc_t:s0
+# IPC rundir for group 'users'.
+/run/ipc/user(/.*)?                          system_u:object_r:urados_ipc_t:s0
 
 # Traversal-only directories on the path to the above.
-/data                        system_u:object_r:urados_path_dir_t:s0
-/urados/bin                  system_u:object_r:urados_path_dir_t:s0
-/run/ipc                     system_u:object_r:urados_path_dir_t:s0
+/data                                     -d    system_u:object_r:urados_path_dir_t:s0
+/urados/bin                               -d    system_u:object_r:urados_path_dir_t:s0
+/run/ipc                                  -d    system_u:object_r:urados_path_dir_t:s0

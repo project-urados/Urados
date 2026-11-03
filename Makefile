@@ -1,15 +1,15 @@
 # Top-level build for Urados. Builds every tool so that nothing has to be
 # compiled from inside a subdirectory.
 #
-#   make              build urpkg, urdev and apprestorecon (in pkg_mgr/build/)
+#   make              build urpkg, urdev, apprestorecon, and urapp-runner
 #   make test         build, then run the end-to-end suite (needs passwordless
 #                     sudo; see pkg_mgr/tests/test_e2e.sh)
-#   make install      install the tools into $(DESTDIR)$(PREFIX)/bin
-#                     (PREFIX defaults to /usr/local)
+#   make install      install user tools into $(DESTDIR)$(PREFIX)/bin
+#                     and urapp-runner into $(DESTDIR)/urados/bin
 #   make clean        remove all build output
 #
 # Requirements: gcc, pkg-config, and the development files for libxml-2.0,
-# libzip, libcurl, OpenSSL 3, libselinux and libsemanage.
+# libzip, libcurl, OpenSSL 3, libselinux, libsemanage and libacl.
 
 PREFIX  ?= /usr/local
 DESTDIR ?=
@@ -28,6 +28,8 @@ install: all
 	for t in $(TOOLS); do \
 		install -m 0755 "$(PKG_MGR)/build/$$t" "$(DESTDIR)$(PREFIX)/bin/$$t" || exit 1; \
 	done
+	install -d "$(DESTDIR)/urados/bin"
+	install -m 0755 "$(PKG_MGR)/build/urapp-runner" "$(DESTDIR)/urados/bin/urapp-runner"
 
 clean:
 	$(MAKE) -C $(PKG_MGR) clean

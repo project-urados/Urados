@@ -1,7 +1,8 @@
 # Urados package tools: urpkg (package manager) and urdev (developer tool).
 #
 # Requires gcc, pkg-config, and development files for libxml-2.0, libzip,
-# libcurl and OpenSSL 3.
+# libcurl, OpenSSL 3, libselinux, libsemanage and libacl. Policy builds need the
+# SELinux development Makefile; E2E tests also need passwordless sudo and semodule.
 #
 #   make        build build/urpkg and build/urdev
 #   make test   build, run certificate tests, then end-to-end tests (the latter
@@ -9,7 +10,7 @@
 
 CC     ?= cc
 CFLAGS ?= -O2 -g
-DEPS    = libxml-2.0 libzip libcurl libcrypto libselinux libsemanage
+DEPS    = libxml-2.0 libzip libcurl libcrypto libselinux libsemanage libacl
 CFLAGS += -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Iinclude \
           $(shell pkg-config --cflags $(DEPS))
 LDLIBS += $(shell pkg-config --libs $(DEPS))
@@ -18,7 +19,7 @@ BUILD  = build
 HDRS   = include/urados_pkg.h
 COMMON = src/common.c src/crypto.c src/manifest.c src/sys.c src/archive.c src/fetch.c src/selinux.c
 
-all: $(BUILD)/urpkg $(BUILD)/urdev $(BUILD)/apprestorecon
+all: $(BUILD)/urpkg $(BUILD)/urdev $(BUILD)/apprestorecon $(BUILD)/urapp-runner
 
 $(BUILD)/urpkg: $(COMMON) src/install.c src/urpkg_main.c $(HDRS) | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ $(COMMON) src/install.c src/urpkg_main.c $(LDLIBS)
@@ -28,6 +29,9 @@ $(BUILD)/urdev: $(COMMON) src/pack.c src/urdev_main.c $(HDRS) | $(BUILD)
 
 $(BUILD)/apprestorecon: $(COMMON) src/apprestorecon_main.c $(HDRS) | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ $(COMMON) src/apprestorecon_main.c $(LDLIBS)
+
+$(BUILD)/urapp-runner: src/app_runner.c $(HDRS) | $(BUILD)
+	$(CC) $(CFLAGS) -o $@ src/app_runner.c $(shell pkg-config --libs libselinux)
 
 $(BUILD)/urpkg_small_limit: $(COMMON) src/install.c src/urpkg_main.c $(HDRS) | $(BUILD)
 	$(CC) $(CFLAGS) -DPKG_UNPACKED_MAX=65536 -o $@ $(COMMON) src/install.c src/urpkg_main.c $(LDLIBS)

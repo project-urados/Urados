@@ -1,23 +1,16 @@
 /*
- * probe.c - test helper for the end-to-end suite.
- *
- * Built static so it runs inside the staging chroot with no libraries.
- *
- *   probe                    self-check, run as the app by `urpkg start`.
- *                            Exit 0 only if every expectation holds.
- *   probe --op read PATH     exit 0 if PATH can be opened for reading
- *   probe --op write PATH    exit 0 if PATH can be created for writing
- *   probe --op list DIR      exit 0 if DIR can be listed
- *
- * In the --op forms a denial prints "denied" and exits 1, so a failure to run
- * the probe at all is never mistaken for a denial.
+ * probe.c - static integration-test app used to check the DAC layout.
+ * SELinux execution denials are additionally asserted by policy neverallows;
+ * staging-root tests do not emulate kernel SELinux enforcement.
  */
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static int one_op(const char *op, const char *path)
@@ -33,7 +26,7 @@ static int one_op(const char *op, const char *path)
         }
         close(fd);
     } else if (strcmp(op, "write") == 0) {
-        fd = open(path, O_WRONLY | O_CREAT, 0600);
+        fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
         if (fd < 0) {
             printf("write %s: denied (%s)\n", path, strerror(errno));
             return 1;
@@ -46,6 +39,11 @@ static int one_op(const char *op, const char *path)
             return 1;
         }
         closedir(d);
+    } else if (strcmp(op, "chmod") == 0) {
+        if (chmod(path, 0755) != 0) {
+            printf("chmod %s: denied (%s)\n", path, strerror(errno));
+            return 1;
+        }
     } else {
         fprintf(stderr, "probe: unknown op '%s'\n", op);
         return 2;
@@ -54,11 +52,62 @@ static int one_op(const char *op, const char *path)
     return 0;
 }
 
+static int copy_self_and_exec(const char *self)
+{
+    const char *generated = "../system_cache/user/generated-probe";
+    char buf[16384];
+    char *child_argv[] = { (char *)generated, "--op", "write",
+                           "../system_cache/user/generated-marker", NULL };
+    int in = -1, out = -1, rc = -1;
+    ssize_t n;
+    pid_t pid;
+    int status;
+
+    in = open(self, O_RDONLY | O_CLOEXEC);
+    out = open(generated, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0700);
+    if (in < 0 || out < 0)
+        goto done;
+    while ((n = read(in, buf, sizeof(buf))) > 0) {
+        ssize_t off = 0;
+        while (off < n) {
+            ssize_t w = write(out, buf + off, (size_t)(n - off));
+            if (w <= 0)
+                goto done;
+            off += w;
+        }
+    }
+    if (n < 0 || fchmod(out, 0700) != 0)
+        goto done;
+    close(in);
+    close(out);
+    in = out = -1;
+    pid = fork();
+    if (pid < 0)
+        goto done;
+    if (pid == 0) {
+        execv(generated, child_argv);
+        _exit(127);
+    }
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR)
+            goto done;
+    }
+    rc = WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -1;
+done:
+    if (in >= 0)
+        close(in);
+    if (out >= 0)
+        close(out);
+    printf("cache_generated_exec=%s\n", rc == 0 ? "ok" : "FAILED");
+    return rc;
+}
+
 static int self_check(int argc, char **argv)
 {
     gid_t groups[64];
     char cwd[512];
     int ng, i, ok = 1, fd;
+    DIR *d;
 
     printf("uid=%u gid=%u euid=%u\n", (unsigned)getuid(), (unsigned)getgid(),
            (unsigned)geteuid());
@@ -73,36 +122,48 @@ static int self_check(int argc, char **argv)
     for (i = 1; i < argc; i++)
         printf("arg=%s\n", argv[i]);
 
-    /* The code folder must not be writable by the app. */
-    fd = open("system_cache/app/planted", O_WRONLY | O_CREAT, 0600);
+    /* The app can add or replace programs beneath its own mutable cache. */
+    fd = open("../system_cache/user/probe-created", O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (fd >= 0) {
         close(fd);
-        unlink("system_cache/app/planted");
-        printf("cache_write=ALLOWED\n");
-        ok = 0;
+        printf("cache_write=ok\n");
     } else {
-        printf("cache_write=denied (%s)\n", strerror(errno));
+        printf("cache_write=FAILED (%s)\n", strerror(errno));
+        ok = 0;
     }
 
-    /* The app must not be able to move or delete system_cache. */
-    if (rename("system_cache", "stolen") == 0) {
+    /* The top-level cache grants this UID WX but not read/list permission. */
+    d = opendir("../system_cache");
+    if (d) {
+        closedir(d);
+        printf("cache_list=ALLOWED\n");
+        ok = 0;
+    } else {
+        printf("cache_list=denied (%s)\n", strerror(errno));
+    }
+
+    /* The app cannot rename/replace the cache entry in its root-owned parent. */
+    if (rename("../system_cache", "../stolen") == 0) {
         printf("rename_cache=ALLOWED\n");
         ok = 0;
     } else {
         printf("rename_cache=denied (%s)\n", strerror(errno));
     }
 
-    /* A non-entry payload file must not be readable by the app. */
-    fd = open("system_cache/app/extra.txt", O_RDONLY);
+    /* Package payload is readable to the app within its own cache. */
+    fd = open("../system_cache/app/extra.txt", O_RDONLY);
     if (fd >= 0) {
         close(fd);
-        printf("read_extra=ALLOWED\n");
-        ok = 0;
+        printf("read_extra=ok\n");
     } else {
-        printf("read_extra=denied (%s)\n", strerror(errno));
+        printf("read_extra=FAILED (%s)\n", strerror(errno));
+        ok = 0;
     }
 
-    /* The app must not be able to get root back. */
+    /* App-created code in its own cache can be chmod'd and executed. */
+    if (copy_self_and_exec(argv[0]) != 0)
+        ok = 0;
+
     if (setuid(0) == 0) {
         printf("setuid0=ALLOWED\n");
         ok = 0;
@@ -110,7 +171,6 @@ static int self_check(int argc, char **argv)
         printf("setuid0=denied\n");
     }
 
-    /* App data must be writable. */
     fd = open("probe-data.txt", O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (fd >= 0 && write(fd, "ok\n", 3) == 3) {
         printf("data_write=ok\n");

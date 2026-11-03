@@ -1,10 +1,9 @@
 /*
  * crypto.c - package signatures and X.509 code-signing certificates.
  *
- * Legacy packages may use a raw trusted Ed25519 public key. Certificate
- * packages carry a PEM leaf/intermediate chain; trust anchors are self-signed
- * CA certificates (*.crt) installed by the device administrator. Private keys
- * are only read by urdev on the publisher's machine.
+ * Every package carries a PEM leaf/intermediate chain; trust anchors are
+ * self-signed CA certificates (*.crt) installed by the device administrator.
+ * Private keys are only read by urdev on the publisher's machine.
  */
 #include <dirent.h>
 #include <errno.h>
@@ -41,79 +40,6 @@ static int is_supported_signing_key(EVP_PKEY *k)
 static const EVP_MD *signing_digest(EVP_PKEY *key)
 {
     return is_ed25519(key) ? NULL : EVP_sha256();
-}
-void pkg_free_keys(EVP_PKEY **keys, size_t n)
-{
-    size_t i;
-    if (!keys)
-        return;
-    for (i = 0; i < n; i++)
-        EVP_PKEY_free(keys[i]);
-    free(keys);
-}
-/* Load legacy raw public keys (*.pem). Certificate roots use the .crt suffix. */
-int pkg_load_trusted_keys(const char *dir, EVP_PKEY ***out, size_t *outn,
-                          char *err, size_t errlen)
-{
-    DIR *d;
-    struct dirent *e;
-    EVP_PKEY **keys = NULL;
-    size_t cnt = 0, cap = 0;
-    d = opendir(dir);
-    if (!d) {
-        pkg_seterr(err, errlen, "cannot open trusted key dir %s: %s", dir, strerror(errno));
-        return -1;
-    }
-    while ((e = readdir(d)) != NULL) {
-        char path[PKG_PATH_MAX];
-        size_t l = strlen(e->d_name);
-        int fd;
-        FILE *fp;
-        EVP_PKEY *k;
-        if (l < 5 || e->d_name[0] == '.' || strcmp(e->d_name + l - 4, ".pem") != 0)
-            continue;
-        if (snprintf(path, sizeof(path), "%s/%s", dir, e->d_name) >= (int)sizeof(path))
-            continue;
-        fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-        if (fd < 0)
-            continue;
-        fp = fdopen(fd, "r");
-        if (!fp) {
-            close(fd);
-            continue;
-        }
-        k = PEM_read_PUBKEY(fp, NULL, NULL, NULL);
-        fclose(fp);
-        if (!k) {
-            pkg_seterr(err, errlen, "invalid legacy public key %s (certificate roots must end in .crt)", path);
-            goto fail;
-        }
-        if (EVP_PKEY_get_base_id(k) != EVP_PKEY_ED25519) {
-            EVP_PKEY_free(k);
-            pkg_seterr(err, errlen, "legacy trusted key %s is not Ed25519", path);
-            goto fail;
-        }
-        if (cnt == cap) {
-            size_t ncap = cap ? cap * 2 : 4;
-            EVP_PKEY **nk = realloc(keys, ncap * sizeof(*nk));
-            if (!nk) {
-                EVP_PKEY_free(k);
-                pkg_seterr(err, errlen, "out of memory");
-                goto fail;
-            }
-            keys = nk;
-            cap = ncap;
-        }
-        keys[cnt++] = k;
-    }
-    closedir(d);
-    *out = keys;
-    *outn = cnt;
-    return 0;
-fail:
-    closedir(d);
-    pkg_free_keys(keys, cnt);
-    return -1;
 }
 int pkg_check_signature(EVP_PKEY **keys, size_t n, const unsigned char *data,
                         size_t dlen, const unsigned char *sig, size_t slen)
@@ -434,8 +360,15 @@ static int load_root_certificates(const char *dir, X509_STORE *store,
         X509 *cert;
         EVP_PKEY *pub;
         ASN1_BIT_STRING *ku;
-        int valid;
-        if (e->d_name[0] == '.' || !is_suffix(e->d_name, ".crt"))
+        int valid, ch, trailing_junk = 0;
+        if (e->d_name[0] == '.')
+            continue;
+        if (is_suffix(e->d_name, ".pem")) {
+            pkg_seterr(err, errlen, "raw public keys are not trusted; install whole CA certificates as .crt files (%s)", e->d_name);
+            closedir(d);
+            return -1;
+        }
+        if (!is_suffix(e->d_name, ".crt"))
             continue;
         if (snprintf(path, sizeof(path), "%s/%s", dir, e->d_name) >= (int)sizeof(path))
             continue;
@@ -448,9 +381,13 @@ static int load_root_certificates(const char *dir, X509_STORE *store,
             continue;
         }
         cert = PEM_read_X509(fp, NULL, NULL, NULL);
+        while ((ch = fgetc(fp)) != EOF)
+            if (!is_pem_space((unsigned char)ch))
+                trailing_junk = 1;
         fclose(fp);
-        if (!cert) {
-            pkg_seterr(err, errlen, "invalid root certificate %s", path);
+        if (!cert || trailing_junk) {
+            X509_free(cert);
+            pkg_seterr(err, errlen, "invalid or trailing data in root certificate %s (one complete PEM certificate required)", path);
             closedir(d);
             return -1;
         }
