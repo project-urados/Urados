@@ -104,6 +104,16 @@ int pkg_open_subdir(int base, const char *name, mode_t mode, uid_t uid, gid_t gi
     return openat(base, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
 }
 
+/* Returns 1 if the immutable flag is set, 0 if not, -1 on error. */
+int pkg_get_immutable_fd(int fd)
+{
+    long flags = 0;
+
+    if (ioctl(fd, FS_IOC_GETFLAGS, &flags) != 0)
+        return -1;
+    return (flags & FS_IMMUTABLE_FL) ? 1 : 0;
+}
+
 /* Sets or clears the immutable flag (chattr +i/-i) on an open file or dir. */
 int pkg_set_immutable_fd(int fd, int on)
 {

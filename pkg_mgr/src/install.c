@@ -128,7 +128,8 @@ static int run_acct(const pkg_opts *o, const char *tool, const char *const *args
 
     argv[n++] = (char *)tool;
     if (o->root[0] != '\0') {
-        argv[n++] = "-R";
+        /* -P (prefix), not -R (chroot): -R fails in staging trees. */
+        argv[n++] = "-P";
         argv[n++] = (char *)o->root;
     }
     for (i = 0; i < nargs && n < PKG_ARGS_MAX - 1; i++)
@@ -233,8 +234,10 @@ int pkg_cmd_install(const char *source, const pkg_opts *o)
     int tfd, rc = 1;
     uid_t uid = 0, pgid = 0;
     gid_t usersgid = 0;
+    pkg_sel_state sel;
 
     memset(&v, 0, sizeof(v));
+    memset(&sel, 0, sizeof(sel));
     if (require_root() != 0)
         return 1;
 
@@ -337,7 +340,17 @@ int pkg_cmd_install(const char *source, const pkg_opts *o)
         goto out;
     }
 
-    /* 3. App data: /data/app/<name> owned by the app user, group 'users'. */
+    /*
+     * 3. SELinux: SELinux user <name>_u, and the login <name> mapped to it.
+     * On failure pkg_sel_register undoes its own partial work. The rollback
+     * below undoes the rest, using the record of what was added.
+     */
+    if (pkg_sel_register(o, name, &sel, err, sizeof(err)) != 0) {
+        msg_err("%s", err);
+        goto out;
+    }
+
+    /* 4. App data: /data/app/<name> owned by the app user, group 'users'. */
     app_made = 1;
     app_fd = pkg_open_subdir(appdata_fd, name, APP_DIR_MODE, uid, usersgid);
     if (app_fd < 0) {
@@ -354,20 +367,25 @@ int pkg_cmd_install(const char *source, const pkg_opts *o)
         goto out;
     }
 
-    printf("installed %s %s: app user '%s' (uid %u), data in %s\n",
-           v.manifest.name, v.manifest.version, name, (unsigned)uid, home);
+    printf("installed %s %s: app user '%s' (uid %u), SELinux user '%s_u', data in %s\n",
+           v.manifest.name, v.manifest.version, name, (unsigned)uid, name, home);
     rc = 0;
 
 out:
     if (rc != 0) {
+        char uerr[512] = "";
+
         if (app_made) {
             set_cache_lock(appdata_fd, name, 0);
             pkg_rm_entry_at(appdata_fd, name, 0);
         }
         if (pkgdir_made)
             pkg_rm_entry_at(progs_fd, name, 0);
-        if (acct_made)
+        if (acct_made) {
+            if (pkg_sel_unregister(o, name, &sel, uerr, sizeof(uerr)) != 0)
+                msg_err("%s", uerr);
             remove_account(o, name);
+        }
     }
     if (staged && stage_fd >= 0)
         unlinkat(stage_fd, stage_name, 0);
