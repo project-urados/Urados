@@ -50,7 +50,6 @@ A failed verification or extraction does not replace the previous complete packa
 | `docs/APP-SANDBOX.md` | Detailed filesystem, ACL, process, and migration model. |
 | `docs/CODE-SIGNING.md` | Publisher, CA operator, and device administrator signing workflow. |
 | `docs/BUILD.md` | Distribution-specific build dependencies and test prerequisites. |
-| `docs/images/flow.mmd` | Source for the architecture diagram in `docs/images/flow.png`. |
 
 ## Build requirements
 
