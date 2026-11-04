@@ -130,31 +130,6 @@ int pkg_digest_cmp(const void *a, const void *b)
     return strcmp(x->name, y->name);
 }
 
-/* Builds "<hex>  <name>\n" lines. The array must already be sorted. */
-int pkg_digest_text(const pkg_digest *d, size_t n, unsigned char **out, size_t *outlen)
-{
-    size_t total = 0, i, off = 0;
-    unsigned char *buf;
-
-    for (i = 0; i < n; i++)
-        total += 64 + 2 + strlen(d[i].name) + 1;
-    buf = malloc(total + 1);
-    if (!buf)
-        return -1;
-    for (i = 0; i < n; i++) {
-        int w = snprintf((char *)buf + off, total + 1 - off, "%s  %s\n",
-                         d[i].hex, d[i].name);
-        if (w < 0 || (size_t)w >= total + 1 - off) {
-            free(buf);
-            return -1;
-        }
-        off += (size_t)w;
-    }
-    *out = buf;
-    *outlen = off;
-    return 0;
-}
-
 void pkg_hex_encode(const unsigned char *md, size_t len, char hex[65])
 {
     static const char digits[] = "0123456789abcdef";
