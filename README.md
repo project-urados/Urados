@@ -2,7 +2,7 @@
 
 Urados is a full operating system built around a secure, native Linux application runtime. It provides the system foundation, device integration points, package lifecycle, application isolation, and SELinux-based confinement needed to operate a complete device or product environment.
 
-The creators of Urados also offer selected parts of the operating system as open-source software under the name **Urados Open Source Software (UOSS)**. UOSS makes it possible to integrate useful Urados components—such as package management, signing, application sandboxing, policy, and supporting system utilities—into another operating system or an existing product without adopting the entire Urados OS. The availability and license of each component are defined by the component’s source repository and license.
+The creators of Urados also offer selected parts of the operating system as open-source software under the name **Urados Open Source Software (UOSS)**. UOSS lets you integrate useful Urados components—such as package management, signing, application sandboxing, policy, and supporting system utilities—into another operating system or existing product without adopting the entire Urados OS. The availability and license of each component are defined by the component’s source repository and license.
 
 It provides two command-line tools:
 
@@ -11,11 +11,11 @@ It provides two command-line tools:
 
 At runtime, each app gets its own Unix UID and SELinux user/domain. POSIX ACLs isolate writable data and executable cache content between apps, while the SELinux policy prevents ordinary app data from being executed directly.
 
-![Urados package and runtime flow](docs/images/flow.mmd)
+![Urados package and runtime flow](docs/images/flow.png)
 
 ## Status and scope
 
-Urados is intended to be used as a complete operating system, while the components published as UOSS can be adopted independently by other systems. This repository documents and implements the Urados application runtime and its supporting system components; it is not a general-purpose desktop package ecosystem. Device integration requires a prepared SELinux base policy, an administrator-managed trust directory, the `/urados` runtime layout, and an enforcing SELinux configuration. The staged `--root` mode used by tests is useful for development, but it is **not** a security boundary and does not emulate SELinux enforcement.
+Urados is intended to be used as a complete operating system, while other systems can adopt the components published as UOSS independently. This repository documents and implements the Urados application runtime and its supporting system components; it is not a general-purpose desktop package ecosystem. Device integration requires a prepared SELinux base policy, an administrator-managed trust directory, the `/urados` runtime layout, and an enforcing SELinux configuration. The staged `--root` mode used by tests is useful for development, but it is **not** a security boundary and does not emulate SELinux enforcement.
 
 ## Urados OS and UOSS
 
