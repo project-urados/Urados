@@ -5,16 +5,18 @@
  *   urdev  - developer tool: init / check / keygen / pack.
  *
  * Package format: a zip archive containing
- *   manifest.xml   XML manifest (schema in src/manifest.c)
- *   SIGNATURE      signature over the digest text
- *   SIGNER_CERTS   required PEM leaf/intermediate X.509 chain
- *   app/<rel>      payload files, installed as system_cache/app/<rel>
+ *   manifest.xml             XML manifest (schema in src/manifest.c)
+ *   SIGNER_CERTS.pem         required PEM leaf/intermediate X.509 chain
+ *   app/<rel>                payload files, installed as system_cache/app/<rel>
+ *   META-INF/MANIFEST.MF     APK/JAR-style SHA-256 digest of every file above
+ *   META-INF/CERT.SF         SHA-256 digest of MANIFEST.MF and of each of its sections
+ *   META-INF/CERT.SIG        publisher signature over the exact bytes of CERT.SF
  *
- * Digest text: one line per archive file except SIGNATURE (manifest.xml is
- * included), sorted by name with strcmp:
- *   "<sha256 hex>  <name>\n"
- * The signature covers exactly these bytes, so no file can be added, removed
- * or swapped without invalidating the package.
+ * Verification order: CERT.SIG over CERT.SF (signer chain to an installed CA
+ * root), then CERT.SF over MANIFEST.MF and each MANIFEST.MF section, then each
+ * file's content against its MANIFEST.MF digest. Only SHA-256 is used. See
+ * src/meta_files.c for the exact text format. Any added, removed or changed
+ * file invalidates the package.
  *
  * Installed layout (every device path is prefixed by --root when one is given):
  *   /data/app_progs/                        root:root 0700   root only
@@ -47,7 +49,8 @@
 #define PKG_AUTHOR_MAX  127
 #define PKG_ENTRY_MAX   255
 #define PKG_PATH_MAX    1024
-#define PKG_META_MAX    (1024u * 1024u)        /* manifest, signature, signer chain */
+#define PKG_META_MAX    (1024u * 1024u)        /* manifest.xml, CERT.SIG, signer chain */
+#define PKG_MF_MAX      (4u * 1024u * 1024u)   /* MANIFEST.MF and CERT.SF */
 #define PKG_FILE_MAX    (256u * 1024u * 1024u) /* any single payload file */
 #define PKG_ARCHIVE_MAX (1024u * 1024u * 1024u)
 #ifndef PKG_UNPACKED_MAX
@@ -58,8 +61,11 @@
 #define PKG_ARGS_MAX    64
 
 #define PKG_MANIFEST_FILE  "manifest.xml"
-#define PKG_SIGNATURE_FILE "SIGNATURE"
 #define PKG_SIGNER_CERTS_FILE "SIGNER_CERTS.pem"
+#define PKG_MF_FILE        "META-INF/MANIFEST.MF"
+#define PKG_SF_FILE        "META-INF/CERT.SF"
+#define PKG_SIG_FILE       "META-INF/CERT.SIG"
+#define PKG_CREATED_BY     "1.0 (Urados)"        /* Created-By header value */
 #define PKG_ARCHIVE_SUFFIX ".zip"             /* trusted archive: <app-name>.zip */
 #define PKG_KEYS_SUBDIR    "/etc/urados/keys" /* administrator-installed X.509 CA roots */
 #define PKG_DATA_DIR       "/data"
@@ -110,7 +116,7 @@ typedef struct {
 /* Result of a successful verification. Release with pkg_verified_free(). */
 typedef struct {
     pkg_manifest manifest;
-    pkg_digest *digests; /* sorted; includes manifest/signer chain, excludes SIGNATURE */
+    pkg_digest *digests; /* sorted; includes manifest.xml and signer chain, excludes META-INF/ */
     size_t ndigests;
 } pkg_verified;
 
@@ -141,7 +147,6 @@ int  pkg_version_valid(const char *v);
 int  pkg_path_safe(const char *p);
 int  pkg_entry_zipname(const char *entry, char *out, size_t outlen);
 int  pkg_digest_cmp(const void *a, const void *b);
-int  pkg_digest_text(const pkg_digest *d, size_t n, unsigned char **out, size_t *outlen);
 void pkg_hex_encode(const unsigned char *md, size_t len, char hex[65]);
 void pkg_sha256(const void *data, size_t len, char hex[65]);
 int  pkg_read_file(const char *path, size_t max, unsigned char **out, size_t *outlen);
@@ -165,6 +170,12 @@ int  pkg_verify_certificate_signature(const unsigned char *chain, size_t chainle
                                       char *err, size_t errlen);
 int  pkg_create_csr(const char *keypath, const char *csrpath,
                     const pkg_cert_subject *subject, char *err, size_t errlen);
+
+/* meta_files.c (APK/JAR-style MANIFEST.MF and CERT.SF, SHA-256 only) */
+int  pkg_meta_build(const pkg_digest *d, size_t n, unsigned char **mf, size_t *mflen,
+                    unsigned char **sf, size_t *sflen, char *err, size_t errlen);
+int  pkg_meta_verify(const unsigned char *mf, size_t mflen, const unsigned char *sf,
+                     size_t sflen, const pkg_digest *d, size_t n, char *err, size_t errlen);
 
 /* archive.c */
 int  pkg_verify(const char *zip_path, const char *keys_dir, pkg_verified *v,

@@ -117,3 +117,28 @@ urpkg verify my-app.zip
 ```
 
 The `--keys DIR` option selects the trust directory. Its `.crt` files must each contain exactly one complete PEM-encoded self-signed CA certificate with `CA:TRUE` and `keyCertSign`. Raw public-key files are not trust anchors; malformed or extra certificates in a root file are rejected. Keep this directory administrator-controlled. There is no raw-key or unsigned-package compatibility mode: all packages require `SIGNER_CERTS.pem` and a chain to an installed CA root. Chains are limited to 16 certificates; archives and aggregate uncompressed content are each limited to 1 GiB, with individual payload files limited to 256 MiB.
+
+## Package signature format (APK/JAR-style, SHA-256)
+
+Packages use the same metadata layout as Android APK signing (JAR manifest
+signing), restricted to SHA-256. SHA-1 digests (`SHA1-Digest`,
+`SHA1-Digest-Manifest`) and Android-specific headers such as
+`X-Android-APK-Signed` are rejected.
+
+- `META-INF/MANIFEST.MF` has a main section (`Manifest-Version: 1.0`,
+  `Created-By`), then one section per file in the package except `META-INF/`:
+  `Name: <path>` and `SHA-256-Digest: <base64 SHA-256 of the file>`. The files
+  covered are `manifest.xml`, `SIGNER_CERTS.pem` and every `app/` payload file.
+- `META-INF/CERT.SF` has a main section (`Signature-Version: 1.0`,
+  `Created-By`, `SHA-256-Digest-Manifest: <base64 SHA-256 of the whole
+  MANIFEST.MF file>`), then one section per MANIFEST.MF section with `Name` and
+  `SHA-256-Digest` set to the base64 SHA-256 of that exact section, including
+  its trailing blank line.
+- `META-INF/CERT.SIG` is the publisher signature over the exact bytes of
+  CERT.SF. Its signer chain in `SIGNER_CERTS.pem` must validate to an installed
+  root.
+
+`urpkg` checks CERT.SIG first, then CERT.SF against MANIFEST.MF, then
+MANIFEST.MF against every file. Headers longer than 72 bytes continue on lines
+that start with one space. Unknown headers, missing or extra entries, and any
+digest mismatch reject the package.

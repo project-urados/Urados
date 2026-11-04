@@ -2,14 +2,16 @@
  * archive.c - verify and extract package archives (libzip + OpenSSL).
  *
  * Verification never trusts anything before the signature is checked:
- *   1. Walk every zip entry. Accept only manifest.xml, SIGNATURE,
- *      SIGNER_CERTS.pem and
- *      app/<safe path> regular files. Reject directories, symlinks, devices,
- *      encrypted entries, duplicate names and oversized files.
- *   2. Hash every accepted file (streaming, size-limited).
- *   3. Build the digest text (see urados_pkg.h) and check SIGNATURE against
- *      its signer chain to administrator-installed root certificates.
- *   4. Only then parse manifest.xml and check that its <entry> is a signed
+ *   1. Walk every zip entry. Accept only manifest.xml, SIGNER_CERTS.pem,
+ *      META-INF/{MANIFEST.MF,CERT.SF,CERT.SIG} and app/<safe path> regular
+ *      files. Reject directories, symlinks, devices, encrypted entries,
+ *      duplicate names and oversized files.
+ *   2. Hash every file outside META-INF/ (streaming, size-limited).
+ *   3. Check CERT.SIG over CERT.SF against the signer chain to
+ *      administrator-installed root certificates.
+ *   4. Check CERT.SF against MANIFEST.MF and each MANIFEST.MF section, then
+ *      MANIFEST.MF against the SHA-256 of every file (see meta_files.c).
+ *   5. Only then parse manifest.xml and check that its <entry> is a signed
  *      payload file.
  *
  * Extraction reads the archive again and re-hashes every file while writing
@@ -105,8 +107,9 @@ static int check_entry_kind(zip_t *z, zip_uint64_t idx, const char *name,
 
 static int name_allowed(const char *name)
 {
-    if (strcmp(name, PKG_MANIFEST_FILE) == 0 || strcmp(name, PKG_SIGNATURE_FILE) == 0 ||
-        strcmp(name, PKG_SIGNER_CERTS_FILE) == 0)
+    if (strcmp(name, PKG_MANIFEST_FILE) == 0 || strcmp(name, PKG_SIGNER_CERTS_FILE) == 0 ||
+        strcmp(name, PKG_MF_FILE) == 0 || strcmp(name, PKG_SF_FILE) == 0 ||
+        strcmp(name, PKG_SIG_FILE) == 0)
         return 1;
     if (strncmp(name, PKG_ZIP_APP_PREFIX, strlen(PKG_ZIP_APP_PREFIX)) != 0)
         return 0;
@@ -208,6 +211,26 @@ void pkg_verified_free(pkg_verified *v)
     memset(v, 0, sizeof(*v));
 }
 
+/* Reads a META-INF/ or manifest/chain entry that may appear only once. */
+static int read_meta_once(zip_t *z, zip_uint64_t idx, const char *name, size_t max,
+                          unsigned char **buf, size_t *len, int *seen, char hex[65],
+                          uint64_t *unpacked, char *err, size_t errlen)
+{
+    if (*seen) {
+        pkg_seterr(err, errlen, "duplicate %s", name);
+        return -1;
+    }
+    if (read_entry(z, idx, name, max, buf, len, hex, unpacked, err, errlen) != 0)
+        return -1;
+    *seen = 1;
+    return 0;
+}
+
+/*
+ * Verifies an APK/JAR-style package: CERT.SIG over CERT.SF (signer chain to an
+ * installed root), CERT.SF over MANIFEST.MF and each of its sections, and
+ * MANIFEST.MF over the SHA-256 of every file outside META-INF/.
+ */
 static int verify_certificate_package(const char *zip_path, const char *roots_dir,
                                       pkg_verified *v, char *err, size_t errlen)
 {
@@ -216,10 +239,11 @@ static int verify_certificate_package(const char *zip_path, const char *roots_di
     zip_uint64_t i;
     pkg_digest *digs = NULL;
     size_t nd = 0, cap = 0, k;
-    unsigned char *sig = NULL, *mbuf = NULL, *cert_chain = NULL, *dtext = NULL;
-    size_t siglen = 0, mlen = 0, cert_chain_len = 0, dlen = 0;
+    unsigned char *mf = NULL, *sf = NULL, *sig = NULL, *mbuf = NULL, *cert_chain = NULL;
+    size_t mflen = 0, sflen = 0, siglen = 0, mlen = 0, cert_chain_len = 0;
     uint64_t unpacked = 0;
-    int have_sig = 0, have_manifest = 0, have_cert_chain = 0, rc = -1;
+    int have_mf = 0, have_sf = 0, have_sig = 0, have_manifest = 0, have_cert_chain = 0;
+    int rc = -1;
     char entry_zip[PKG_PATH_MAX];
 
     memset(v, 0, sizeof(*v));
@@ -228,7 +252,7 @@ static int verify_certificate_package(const char *zip_path, const char *roots_di
         return -1;
 
     count = zip_get_num_entries(z, 0);
-    if (count <= 0 || count > PKG_FILES_MAX + 3) {
+    if (count <= 0 || count > PKG_FILES_MAX + 5) {
         pkg_seterr(err, errlen, "package has no entries or too many entries");
         goto out;
     }
@@ -236,7 +260,6 @@ static int verify_certificate_package(const char *zip_path, const char *roots_di
     for (i = 0; i < (zip_uint64_t)count; i++) {
         const char *name = zip_get_name(z, i, 0);
         char hex[65];
-        int is_chain = 0;
 
         if (!name) {
             pkg_seterr(err, errlen, "unreadable entry name");
@@ -248,37 +271,36 @@ static int verify_certificate_package(const char *zip_path, const char *roots_di
             pkg_seterr(err, errlen, "entry '%s' is not allowed in a package", name);
             goto out;
         }
-        if (strcmp(name, PKG_SIGNATURE_FILE) == 0) {
-            if (have_sig) {
-                pkg_seterr(err, errlen, "duplicate %s", PKG_SIGNATURE_FILE);
+
+        /* META-INF/ files are metadata and are not in the digest list. */
+        if (strcmp(name, PKG_MF_FILE) == 0) {
+            if (read_meta_once(z, i, name, PKG_MF_MAX, &mf, &mflen, &have_mf, hex,
+                               &unpacked, err, errlen))
                 goto out;
-            }
-            if (read_entry(z, i, name, PKG_META_MAX, &sig, &siglen, hex, &unpacked, err, errlen))
-                goto out;
-            have_sig = 1;
-            continue; /* SIGNATURE is not part of the digest text */
+            continue;
         }
-        if (strcmp(name, PKG_SIGNER_CERTS_FILE) == 0) {
-            if (have_cert_chain) {
-                pkg_seterr(err, errlen, "duplicate %s", PKG_SIGNER_CERTS_FILE);
+        if (strcmp(name, PKG_SF_FILE) == 0) {
+            if (read_meta_once(z, i, name, PKG_MF_MAX, &sf, &sflen, &have_sf, hex,
+                               &unpacked, err, errlen))
                 goto out;
-            }
-            if (read_entry(z, i, name, PKG_META_MAX, &cert_chain, &cert_chain_len,
-                           hex, &unpacked, err, errlen))
-                goto out;
-            have_cert_chain = 1;
-            is_chain = 1;
+            continue;
         }
+        if (strcmp(name, PKG_SIG_FILE) == 0) {
+            if (read_meta_once(z, i, name, PKG_META_MAX, &sig, &siglen, &have_sig, hex,
+                               &unpacked, err, errlen))
+                goto out;
+            continue;
+        }
+
         if (strcmp(name, PKG_MANIFEST_FILE) == 0) {
-            if (have_manifest) {
-                pkg_seterr(err, errlen, "duplicate %s", PKG_MANIFEST_FILE);
+            if (read_meta_once(z, i, name, PKG_META_MAX, &mbuf, &mlen, &have_manifest, hex,
+                               &unpacked, err, errlen))
                 goto out;
-            }
-            if (read_entry(z, i, name, PKG_META_MAX, &mbuf, &mlen, hex, &unpacked, err, errlen))
+        } else if (strcmp(name, PKG_SIGNER_CERTS_FILE) == 0) {
+            if (read_meta_once(z, i, name, PKG_META_MAX, &cert_chain, &cert_chain_len,
+                               &have_cert_chain, hex, &unpacked, err, errlen))
                 goto out;
-            have_manifest = 1;
-        } else if (!is_chain && read_entry(z, i, name, PKG_FILE_MAX, NULL, NULL,
-                                           hex, &unpacked, err, errlen)) {
+        } else if (read_entry(z, i, name, PKG_FILE_MAX, NULL, NULL, hex, &unpacked, err, errlen)) {
             goto out;
         }
 
@@ -301,9 +323,10 @@ static int verify_certificate_package(const char *zip_path, const char *roots_di
         nd++;
     }
 
-    if (!have_sig || !have_manifest || !have_cert_chain) {
-        pkg_seterr(err, errlen, "package must contain %s, %s and %s",
-                   PKG_MANIFEST_FILE, PKG_SIGNATURE_FILE, PKG_SIGNER_CERTS_FILE);
+    if (!have_mf || !have_sf || !have_sig || !have_manifest || !have_cert_chain) {
+        pkg_seterr(err, errlen, "package must contain %s, %s, %s, %s and %s",
+                   PKG_MF_FILE, PKG_SF_FILE, PKG_SIG_FILE, PKG_MANIFEST_FILE,
+                   PKG_SIGNER_CERTS_FILE);
         goto out;
     }
     if (nd < 2) {
@@ -318,15 +341,13 @@ static int verify_certificate_package(const char *zip_path, const char *roots_di
             goto out;
         }
     }
-    if (pkg_digest_text(digs, nd, &dtext, &dlen) != 0) {
-        pkg_seterr(err, errlen, "out of memory");
-        goto out;
-    }
     if (!roots_dir || pkg_verify_certificate_signature(cert_chain, cert_chain_len,
-            roots_dir, dtext, dlen, sig, siglen, err, errlen) != 0)
+            roots_dir, sf, sflen, sig, siglen, err, errlen) != 0)
+        goto out;
+    if (pkg_meta_verify(mf, mflen, sf, sflen, digs, nd, err, errlen) != 0)
         goto out;
 
-    /* The signature is good, so the manifest is authentic and can be parsed. */
+    /* Every file is authenticated now, so the manifest can be parsed. */
     if (pkg_manifest_parse(mbuf, mlen, &v->manifest, err, errlen) != 0)
         goto out;
     if (pkg_entry_zipname(v->manifest.entry, entry_zip, sizeof(entry_zip)) != 0) {
@@ -354,10 +375,11 @@ out:
             free(digs[k].name);
         free(digs);
     }
+    free(mf);
+    free(sf);
     free(sig);
     free(mbuf);
     free(cert_chain);
-    free(dtext);
     zip_close(z);
     return rc;
 }
@@ -409,7 +431,7 @@ int pkg_extract(const char *zip_path, int appfd, gid_t gid, const pkg_verified *
         mode_t fmode;
 
         if (strncmp(d->name, PKG_ZIP_APP_PREFIX, strlen(PKG_ZIP_APP_PREFIX)) != 0)
-            continue; /* manifest.xml and SIGNATURE are not installed */
+            continue; /* manifest.xml and SIGNER_CERTS.pem are not installed */
         rel = d->name + strlen(PKG_ZIP_APP_PREFIX);
 
         for (j = 0; j < (zip_uint64_t)count; j++) {

@@ -18,7 +18,7 @@ LDLIBS += $(shell $(PKG_CONFIG) --libs $(DEPS) 2>/dev/null)
 
 BUILD  = build
 HDRS   = include/urados_pkg.h
-COMMON = src/common.c src/crypto.c src/manifest.c src/sys.c src/archive.c src/fetch.c src/selinux.c
+COMMON = src/common.c src/crypto.c src/manifest.c src/meta_files.c src/sys.c src/archive.c src/fetch.c src/selinux.c
 
 all: check-deps $(BUILD)/urpkg $(BUILD)/urdev $(BUILD)/apprestorecon $(BUILD)/urapp-runner
 

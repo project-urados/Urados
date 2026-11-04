@@ -18,6 +18,12 @@ expect_fail() {
     desc=$1; shift
     if "$@" >"$T/last.log" 2>&1; then bad "$desc (succeeded)"; cat "$T/last.log"; else ok "$desc"; fi
 }
+expect_err() {
+    pat=$1; desc=$2; shift 2
+    if "$@" >"$T/last.log" 2>&1; then bad "$desc (succeeded)"; cat "$T/last.log"
+    elif grep -q -- "$pat" "$T/last.log"; then ok "$desc"
+    else bad "$desc (wrong error, want '$pat')"; cat "$T/last.log"; fi
+}
 
 openssl req -x509 -newkey rsa:2048 -nodes -keyout "$T/root.key" -out "$T/root.crt" \
     -days 3650 -subj "/CN=Urados Certificate Test Root" \
@@ -68,8 +74,8 @@ expect_ok "urpkg validates signature and chain to installed CA root" "$B/urpkg" 
 mkdir -p "$T/limit-bomb/app" "$T/empty-trust" "$T/extract-output"
 for name in one two three; do truncate -s 32768 "$T/limit-bomb/app/$name"; done
 echo '<package/>' > "$T/limit-bomb/manifest.xml"
-echo x > "$T/limit-bomb/SIGNATURE"
-(cd "$T/limit-bomb" && zip -q -9 "$T/limit-bomb.zip" manifest.xml SIGNATURE app/one app/two app/three)
+mkdir -p "$T/limit-bomb/META-INF" && echo x > "$T/limit-bomb/META-INF/CERT.SIG"
+(cd "$T/limit-bomb" && zip -q -9 "$T/limit-bomb.zip" manifest.xml META-INF/CERT.SIG app/one app/two app/three)
 expect_fail "verifier enforces aggregate uncompressed size limits" "$B/urpkg_small_limit" --keys "$T/empty-trust" verify "$T/limit-bomb.zip"
 if sudo -n "$B/test_extract_limit" "$T/limit-bomb.zip" "$T/extract-output" >"$T/last.log" 2>&1; then
     ok "extractor enforces aggregate uncompressed size limits"
@@ -142,6 +148,57 @@ expect_fail "certificate-signed package rejects modified payload" "$B/urpkg" --k
 rm -rf "$T/chain-unpack" && mkdir "$T/chain-unpack"
 (cd "$T/chain-unpack" && unzip -q "$T/certified.zip" && echo '# chain changed' >>SIGNER_CERTS.pem && zip -q -r "$T/chain-tampered.zip" .)
 expect_fail "certificate-signed package rejects a changed signer chain" "$B/urpkg" --keys "$T/trusted" verify "$T/chain-tampered.zip"
+
+# APK/JAR-style META-INF checks (SHA-256 only). Each case edits the signed
+# package. When the edit should reach the metadata parser rather than stop at
+# the signature check, CERT.SF is re-signed with the publisher key.
+fresh_copy() { rm -rf "$1" && mkdir "$1" && (cd "$1" && unzip -q "$T/certified.zip"); }
+resign_zip() { # resign_zip DIR OUT.zip
+    openssl dgst -sha256 -sign "$T/publisher.key" -out "$1/META-INF/CERT.SIG" "$1/META-INF/CERT.SF"
+    (cd "$1" && zip -q -D -r "$2" .)
+}
+sha256_b64() { printf '%s' "$1" | openssl dgst -sha256 -binary | openssl base64 -A; }
+
+fresh_copy "$T/meta-ok"
+resign_zip "$T/meta-ok" "$T/meta-ok.zip"
+expect_ok "re-signed unmodified META-INF package verifies" "$B/urpkg" --keys "$T/trusted" verify "$T/meta-ok.zip"
+
+# Android-style SHA-1 headers are rejected even when the package is correctly signed.
+fresh_copy "$T/meta-sha1"
+sed -i 's/^SHA-256-Digest-Manifest:/SHA1-Digest-Manifest:/' "$T/meta-sha1/META-INF/CERT.SF"
+resign_zip "$T/meta-sha1" "$T/meta-sha1.zip"
+expect_err "SHA-256-Digest-Manifest" "SHA1-Digest-Manifest in CERT.SF is rejected" \
+    "$B/urpkg" --keys "$T/trusted" verify "$T/meta-sha1.zip"
+
+fresh_copy "$T/meta-sha1e"
+sed -i 's/^SHA-256-Digest: /SHA1-Digest: /' "$T/meta-sha1e/META-INF/MANIFEST.MF" "$T/meta-sha1e/META-INF/CERT.SF"
+resign_zip "$T/meta-sha1e" "$T/meta-sha1e.zip"
+expect_err "SHA-256-Digest" "SHA1-Digest entries are rejected" \
+    "$B/urpkg" --keys "$T/trusted" verify "$T/meta-sha1e.zip"
+
+# CERT.SF edited without re-signing: the publisher signature no longer matches.
+fresh_copy "$T/meta-sf"
+echo '# changed' >> "$T/meta-sf/META-INF/CERT.SF"
+(cd "$T/meta-sf" && zip -q -D -r "$T/meta-sf.zip" .)
+expect_err "does not match its signer certificate" "CERT.SF edited without re-signing is rejected" \
+    "$B/urpkg" --keys "$T/trusted" verify "$T/meta-sf.zip"
+
+# One CERT.SF per-section digest changed, then CERT.SF re-signed. MANIFEST.MF and
+# its main digest are untouched, so the failure must come from the CERT.SF
+# section check ("CERT.SF digest for ..."), not from the MANIFEST.MF check.
+fresh_copy "$T/meta-mf"
+bad=$(sha256_b64 "not the original section")
+sed -i "0,/^SHA-256-Digest: /s||SHA-256-Digest: $bad|" "$T/meta-mf/META-INF/CERT.SF"
+resign_zip "$T/meta-mf" "$T/meta-mf.zip"
+expect_err "CERT.SF digest for" "CERT.SF section digest altered under a re-signed CERT.SF is rejected" \
+    "$B/urpkg" --keys "$T/trusted" verify "$T/meta-mf.zip"
+
+# A payload file not listed in MANIFEST.MF is rejected.
+fresh_copy "$T/meta-extra"
+echo 'extra' > "$T/meta-extra/app/extra.txt"
+(cd "$T/meta-extra" && zip -q -D -r "$T/meta-extra.zip" .)
+expect_err "not in the package\|lists" "unlisted payload file is rejected" \
+    "$B/urpkg" --keys "$T/trusted" verify "$T/meta-extra.zip"
 
 echo "certificate tests passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]

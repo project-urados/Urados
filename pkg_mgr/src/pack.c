@@ -5,9 +5,10 @@
  *   <dir>/manifest.xml   package manifest (schema in manifest.c)
  *   <dir>/app/...        payload, installed as system_cache/app/...
  *
- * pack hashes every file, signs the digest text with the publisher key, and
- * writes manifest.xml, SIGNATURE, optional SIGNER_CERTS.pem and app/... into a zip archive. Symlinks and
- * special files are rejected, so the archive only contains what is listed.
+ * pack hashes every file with SHA-256, builds META-INF/MANIFEST.MF and
+ * META-INF/CERT.SF (see meta_files.c), signs CERT.SF with the publisher key
+ * into META-INF/CERT.SIG, and writes everything into a zip archive. Symlinks
+ * and special files are rejected, so the archive only contains what is listed.
  */
 #include <dirent.h>
 #include <errno.h>
@@ -261,14 +262,31 @@ int pkg_init_project(const char *dir, const char *name, const char *version,
     return fclose(fp) == 0 ? 0 : -1;
 }
 
+/* Adds an in-memory buffer as a regular file. data must outlive zip_close(). */
+static int zip_add_buf(zip_t *z, const char *name, const void *data, size_t len)
+{
+    zip_source_t *src = zip_source_buffer(z, data, len, 0);
+    zip_int64_t idx;
+
+    if (!src)
+        return -1;
+    idx = zip_file_add(z, name, src, ZIP_FL_ENC_UTF_8);
+    if (idx < 0) {
+        zip_source_free(src);
+        return -1;
+    }
+    return zip_file_set_external_attributes(z, (zip_uint64_t)idx, 0, ZIP_OPSYS_UNIX,
+                                            (zip_uint32_t)(0100644u << 16)) == 0 ? 0 : -1;
+}
+
 int pkg_pack(const char *dir, const char *out_zip, EVP_PKEY *key,
              const char *cert_chain_path, char *err, size_t errlen)
 {
     pkg_manifest m;
     file_list l = { NULL, 0, 0 };
     pkg_digest *digs = NULL;
-    unsigned char *dtext = NULL, *sig = NULL, *cert_chain = NULL;
-    size_t dlen = 0, siglen = 0, cert_chain_len = 0, ndigs, i;
+    unsigned char *mf = NULL, *sf = NULL, *sig = NULL, *cert_chain = NULL;
+    size_t mflen = 0, sflen = 0, siglen = 0, cert_chain_len = 0, ndigs, i;
     char path[PKG_PATH_MAX], tmp[PKG_PATH_MAX];
     zip_t *z = NULL;
     int ec = 0, rc = -1;
@@ -295,8 +313,9 @@ int pkg_pack(const char *dir, const char *out_zip, EVP_PKEY *key,
         goto out;
 
     qsort(l.items, l.n, sizeof(*l.items), cmp_items);
+    /* MANIFEST.MF covers every file, including the signer chain. */
     ndigs = l.n + 1;
-    digs = malloc((ndigs ? ndigs : 1) * sizeof(*digs));
+    digs = malloc(ndigs * sizeof(*digs));
     if (!digs) {
         pkg_seterr(err, errlen, "out of memory");
         goto out;
@@ -305,16 +324,13 @@ int pkg_pack(const char *dir, const char *out_zip, EVP_PKEY *key,
         digs[i].name = l.items[i].name;   /* borrowed; freed with the list */
         memcpy(digs[i].hex, l.items[i].hex, sizeof(digs[i].hex));
     }
-    if (cert_chain) {
-        digs[l.n].name = (char *)PKG_SIGNER_CERTS_FILE; /* static name */
-        pkg_sha256(cert_chain, cert_chain_len, digs[l.n].hex);
-    }
+    digs[l.n].name = (char *)PKG_SIGNER_CERTS_FILE; /* static name */
+    pkg_sha256(cert_chain, cert_chain_len, digs[l.n].hex);
     qsort(digs, ndigs, sizeof(*digs), pkg_digest_cmp);
-    if (pkg_digest_text(digs, ndigs, &dtext, &dlen) != 0) {
-        pkg_seterr(err, errlen, "out of memory");
+
+    if (pkg_meta_build(digs, ndigs, &mf, &mflen, &sf, &sflen, err, errlen) != 0)
         goto out;
-    }
-    if (pkg_sign_data(key, dtext, dlen, &sig, &siglen) != 0) {
+    if (pkg_sign_data(key, sf, sflen, &sig, &siglen) != 0) {
         pkg_seterr(err, errlen, "signing failed");
         goto out;
     }
@@ -329,51 +345,14 @@ int pkg_pack(const char *dir, const char *out_zip, EVP_PKEY *key,
         pkg_seterr(err, errlen, "cannot create %s", tmp);
         goto out;
     }
-    for (i = 0; i < l.n; i++) {
-        zip_source_t *src = zip_source_buffer(z, l.items[i].data, l.items[i].len, 0);
-        zip_int64_t idx;
-
-        if (!src)
+    for (i = 0; i < l.n; i++)
+        if (zip_add_buf(z, l.items[i].name, l.items[i].data, l.items[i].len) != 0)
             goto zerr;
-        idx = zip_file_add(z, l.items[i].name, src, ZIP_FL_ENC_UTF_8);
-        if (idx < 0) {
-            zip_source_free(src);
-            goto zerr;
-        }
-        if (zip_file_set_external_attributes(z, (zip_uint64_t)idx, 0, ZIP_OPSYS_UNIX,
-                                             (zip_uint32_t)(0100644u << 16)) != 0)
-            goto zerr;
-    }
-    {
-        zip_source_t *src = zip_source_buffer(z, sig, siglen, 0);
-        zip_int64_t idx;
-
-        if (!src)
-            goto zerr;
-        idx = zip_file_add(z, PKG_SIGNATURE_FILE, src, ZIP_FL_ENC_UTF_8);
-        if (idx < 0) {
-            zip_source_free(src);
-            goto zerr;
-        }
-        if (zip_file_set_external_attributes(z, (zip_uint64_t)idx, 0, ZIP_OPSYS_UNIX,
-                                             (zip_uint32_t)(0100644u << 16)) != 0)
-            goto zerr;
-    }
-    if (cert_chain) {
-        zip_source_t *src = zip_source_buffer(z, cert_chain, cert_chain_len, 0);
-        zip_int64_t idx;
-
-        if (!src)
-            goto zerr;
-        idx = zip_file_add(z, PKG_SIGNER_CERTS_FILE, src, ZIP_FL_ENC_UTF_8);
-        if (idx < 0) {
-            zip_source_free(src);
-            goto zerr;
-        }
-        if (zip_file_set_external_attributes(z, (zip_uint64_t)idx, 0, ZIP_OPSYS_UNIX,
-                                             (zip_uint32_t)(0100644u << 16)) != 0)
-            goto zerr;
-    }
+    if (zip_add_buf(z, PKG_SIGNER_CERTS_FILE, cert_chain, cert_chain_len) != 0 ||
+        zip_add_buf(z, PKG_MF_FILE, mf, mflen) != 0 ||
+        zip_add_buf(z, PKG_SF_FILE, sf, sflen) != 0 ||
+        zip_add_buf(z, PKG_SIG_FILE, sig, siglen) != 0)
+        goto zerr;
     if (zip_close(z) != 0) {
         zip_discard(z);
         z = NULL;
@@ -400,7 +379,8 @@ out:
     if (z)
         zip_discard(z);
     free(digs);
-    free(dtext);
+    free(mf);
+    free(sf);
     free(sig);
     free(cert_chain);
     list_free(&l);
