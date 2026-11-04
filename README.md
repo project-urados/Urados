@@ -11,7 +11,7 @@ It provides two command-line tools:
 
 At runtime, each app gets its own Unix UID and SELinux user/domain. POSIX ACLs isolate writable data and executable cache content between apps, while the SELinux policy prevents ordinary app data from being executed directly.
 
-![Urados package and runtime flow](docs/images/flow.png)
+![Urados package and runtime flow](docs/images/flow.mmd)
 
 ## Status and scope
 
