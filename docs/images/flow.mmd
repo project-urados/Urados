@@ -1,0 +1,75 @@
+%% Urados package and runtime flow
+%% Render with: manus-render-diagram docs/images/flow.mmd docs/images/flow.png
+flowchart TB
+    subgraph PUB[Publisher machine]
+        direction TB
+        SRC["App project\nmanifest.xml + app/*"]
+        KEY["Publisher private key\nRSA / EC / Ed25519"]
+        CERT["Publisher leaf + optional intermediates\nSIGNER_CERTS.pem"]
+        DEV["urdev check\nurdev pack"]
+        ZIP["Signed package.zip\nmanifest.xml\nSIGNER_CERTS.pem\nMETA-INF/MANIFEST.MF\nMETA-INF/CERT.SF\nMETA-INF/CERT.SIG\napp/*"]
+        SRC --> DEV
+        KEY --> DEV
+        CERT --> DEV
+        DEV --> ZIP
+    end
+
+    NET["Local path or HTTP(S)"]
+    ZIP --> NET
+
+    subgraph DEVICE["Target device (root / administrator)"]
+        direction TB
+        ROOTS["/etc/urados/keys/*.crt\nAdministrator-installed CA roots"]
+        INSTALL["urpkg install\nverify chain + package metadata"]
+        TRUST["/data/app_progs/<name>.zip\nroot:root 0600\nper-app lock"]
+        ID["Create app identity\nUnix UID + users group\nSELinux user <name>_u"]
+        TREE["Create protected tree\n/data/app/<name>/data\n/data/app/<name>/system_cache\nper-UID ACLs + labels"]
+        NET --> INSTALL
+        ROOTS -. trust .-> INSTALL
+        INSTALL --> TRUST
+        INSTALL --> ID
+        INSTALL --> TREE
+        TRUST --> START
+        ID --> START
+        TREE --> START
+
+        subgraph START["urpkg start <name>"]
+            direction TB
+            LOCK["Acquire per-app lock"]
+            VERIFY["Open trusted archive without symlinks\nverify certificate + SHA-256 metadata"]
+            STAGE["Extract to temporary package-code tree\nrehash every payload byte"]
+            PUBLISH["Atomic exchange\nsystem_cache/app"]
+            RUNNER["/urados/bin/urapp-runner"]
+            LOCK --> VERIFY --> STAGE --> PUBLISH --> RUNNER
+        end
+    end
+
+    ROOTS -. "trust anchor only" .-> VERIFY
+    RUNNER --> DROP["Drop UID/GID\nclear environment\nenter app data home"]
+    DROP --> TRANSITION["SELinux enforcing required\ntransition to urados_app_t"]
+
+    subgraph APP["Confined app process"]
+        direction TB
+        PROCESS["App entry point"]
+        DATA["/data/app/<name>/data\napp-writable, non-executable"]
+        CACHE["system_cache/app + system_cache/user\napp-private executable cache"]
+        UTILS["/urados/bin/user\ntrusted read-only utilities"]
+        PROCESS --> DATA
+        PROCESS --> CACHE
+        PROCESS --> UTILS
+    end
+
+    TRANSITION --> PROCESS
+    PUBLISH -. "failed verify/extract leaves prior complete tree" .-> CACHE
+
+    classDef boundary fill:#fff8d9,stroke:#8a6d1d,color:#332b00,stroke-width:2px;
+    classDef command fill:#e8e4ff,stroke:#6656b3,color:#21194d,stroke-width:2px;
+    classDef storage fill:#e3f0ff,stroke:#3b6ea8,color:#132b45,stroke-width:2px;
+    classDef security fill:#e5f7ea,stroke:#2d7a46,color:#12351d,stroke-width:2px;
+    classDef app fill:#f5e8ff,stroke:#8050a8,color:#30153f,stroke-width:2px;
+
+    class PUB,DEVICE,START,APP boundary;
+    class DEV,INSTALL,VERIFY,LOCK,RUNNER command;
+    class ZIP,ROOTS,TRUST,TREE,STAGE,PUBLISH,DATA,CACHE,UTILS storage;
+    class ID,DROP,TRANSITION security;
+    class PROCESS app;
