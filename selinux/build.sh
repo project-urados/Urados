@@ -24,10 +24,9 @@ Options:
 
 The SELinux policy is compiled by default, but is not loaded unless
 --install-policy is supplied. Loading it changes the active policy on this
-machine and requires root. The Urados policy also expects device-specific base
-policy declarations described in selinux/base/users.conf; do not load it on a
-stock host policy unless that policy has been prepared for Urados. The confined
-runner is always installed to /urados/bin/urapp-runner.
+machine and requires root. The module declares its own types, users, and roles
+from selinux/urados.te. The confined runner is always installed to
+/urados/bin/urapp-runner.
 
 Examples:
   ./build-install.sh

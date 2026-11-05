@@ -59,5 +59,8 @@ SELinux policy tools, and a usable local SELinux policy store:
 make test
 ```
 
-On a device, compile and install the SELinux policy only after preparing the
-device-specific base policy described in `selinux/base/users.conf`.
+The policy module is self-contained: it declares the Urados types, the static
+SELinux users (`urados_root_u`, `urados_user_u`, `urados_app_u`), and the
+process-transition grants the launcher needs. Install it on a device with
+`./selinux/build.sh --install-policy` as root, after confirming the target
+base policy is an MLS policy and does not already define those names.

@@ -19,7 +19,7 @@ rm -rf "$F" && mkdir -p "$F"
 for f in "$@"; do
     bunzip2 -c "$f" > "$F/$(basename "$f" .bz2)"
 done
-cp "$B/urados.pp" "$B/urados_device_stub.pp" "$F/"
+cp "$B/urados.pp" "$F/"
 cd "$F"
 MODS=$(ls *.pp | grep -v -E '^(base|linked)\.pp$')
 semodule_link -o linked.pp base.pp $MODS 2>link.err

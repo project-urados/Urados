@@ -92,7 +92,7 @@ sudo -n cp -a /var/lib/selinux "$ROOT/var/lib/selinux"
 sudo -n sh -c 'cat "$1" >>"$2"' sh "$HERE/../selinux/urados.fc" \
     "$ROOT/etc/selinux/default/contexts/files/file_contexts"
 sudo -n semodule -n -p "$ROOT" -s default -i \
-    "$HERE/../selinux/build/urados.pp" "$HERE/../selinux/build/urados_device_stub.pp" >/dev/null
+    "$HERE/../selinux/build/urados.pp" >/dev/null
 
 "$URDEV" init "$T/notes" notes 1.0.0 >/dev/null
 expect_eq "new scripts target the trusted BusyBox shell" "#!/urados/bin/user/sh" "$(head -n 1 "$T/notes/app/notes")"
@@ -140,6 +140,17 @@ echo "== install (root)"
 expect_fail "untrusted package is refused at install" sudo -n "$URPKG" --root "$ROOT" install "$T/other-rogue.zip"
 expect_eq "refused install creates no account" "0" "$(sudo -n grep -c '^other:' "$ROOT/etc/passwd" || true)"
 expect_eq "refused install leaves no app directory" "no" "$(sudo -n test -e "$ROOT/data/app/other" && echo yes || echo no)"
+
+# An app named like a policy-defined Urados SELinux user must be refused before
+# any account, trusted copy or app directory is created.
+"$URDEV" init "$T/urados_root" urados_root 1.0.0 >/dev/null
+cp "$T/probe" "$T/urados_root/app/urados_root"
+"$URDEV" pack "$T/urados_root" "$T/urados_root-1.0.0.zip" --key "$T/company.key" --cert "$T/company-chain.pem" >/dev/null
+expect_fail "app named urados_root is refused (reserved SELinux user)" sudo -n "$URPKG" --root "$ROOT" install "$T/urados_root-1.0.0.zip"
+expect_eq "reserved-name install creates no account" "0" "$(sudo -n grep -c '^urados_root:' "$ROOT/etc/passwd" || true)"
+expect_eq "reserved-name install leaves no trusted copy" "no" "$(sudo -n test -e "$ROOT/data/app_progs/urados_root.zip" && echo yes || echo no)"
+expect_eq "reserved-name install leaves no app directory" "no" "$(sudo -n test -e "$ROOT/data/app/urados_root" && echo yes || echo no)"
+expect_eq "reserved-name install is rejected with a clear message" "1" "$(grep -c 'reserved or invalid for SELinux' "$T/last.log" || true)"
 expect_ok "install a signed package" sudo -n "$URPKG" --root "$ROOT" install "$T/notes-1.0.0.zip"
 expect_fail "reinstalling the same package is refused" sudo -n "$URPKG" --root "$ROOT" install "$T/notes-1.0.0.zip"
 

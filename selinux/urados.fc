@@ -28,5 +28,6 @@
 
 # Traversal-only directories on the path to the above.
 /data                                     -d    system_u:object_r:urados_path_dir_t:s0
+/urados                                -d    system_u:object_r:urados_parent_dir_t:s0
 /urados/bin                               -d    system_u:object_r:urados_path_dir_t:s0
 /run/ipc                                  -d    system_u:object_r:urados_path_dir_t:s0

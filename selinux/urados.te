@@ -13,8 +13,6 @@ require {
     attribute unconfined_domain_type;
     type security_t;
     type var_run_t;
-    type urados_root_dir_t;
-    type urados_parent_dir_t;
     type proc_t;
     type usr_t;
     type lib_t;
@@ -30,6 +28,13 @@ require {
     class process { fork transition dyntransition setcurrent setexec ptrace sigchld sigkill sigstop signull signal getsched setsched getpgid setpgid getsession getcap setcap getattr setrlimit share };
     class security { load_policy setenforce setbool setsecparam setcheckreqprot };
     class capability { setuid setgid };
+    # Base-policy process-constraint attributes. The launcher is granted them
+    # below so it can exec an app process whose SELinux user and role differ
+    # from its own. The constraint still requires the target to be
+    # process_user_target, which only urados_app_t is.
+    attribute can_change_process_identity;
+    attribute can_change_process_role;
+    attribute process_user_target;
 }
 
 ########################################
@@ -55,6 +60,11 @@ type urados_lib_t;
 type urados_lib_link_t;
 type urados_ipc_t;
 
+# Traversal-only directory type for /urados, the parent of /urados/bin. It is
+# labelled in urados.fc, so the app and user domains can reach /urados/bin/user
+# without any device-specific label.
+type urados_parent_dir_t;
+
 typeattribute urados_root_t domain;
 typeattribute urados_user_t domain;
 typeattribute urados_app_t domain;
@@ -62,6 +72,7 @@ typeattribute urados_launcher_t domain;
 typeattribute urados_bin_user_t file_type;
 typeattribute urados_app_prog_t file_type;
 typeattribute urados_path_dir_t file_type;
+typeattribute urados_parent_dir_t file_type;
 typeattribute urados_lib_t file_type;
 typeattribute urados_lib_link_t file_type;
 typeattribute urados_root_exec_t file_type;
@@ -90,6 +101,14 @@ allow urados_launcher_t self:process { getattr setexec };
 allow urados_launcher_t self:capability { setuid setgid };
 allow urados_launcher_t urados_app_t:process transition;
 type_transition urados_launcher_t urados_app_code_t:process urados_app_t;
+
+# The launcher execs an app process in a different SELinux user and role
+# (<name>_u:urados_app_r). The base constraints on process transitions allow
+# this only when the source has can_change_process_identity/_role and the
+# target is process_user_target. Nothing else is granted these attributes.
+typeattribute urados_launcher_t can_change_process_identity;
+typeattribute urados_launcher_t can_change_process_role;
+typeattribute urados_app_t process_user_target;
 allow urados_launcher_t urados_app_code_t:file { getattr open read execute map };
 allow urados_launcher_t urados_app_code_t:dir { search getattr };
 allow urados_app_t urados_app_code_t:file entrypoint;
@@ -143,7 +162,7 @@ allow urados_root_t urados_app_data_t:lnk_file { getattr relabelfrom relabelto }
 allow urados_root_t urados_app_code_t:dir { ioctl read write create getattr setattr lock append unlink link rename add_name remove_name reparent search rmdir open };
 allow urados_root_t urados_app_code_t:file { ioctl read write create getattr setattr lock append unlink link rename execute execute_no_trans open map };
 allow urados_root_t urados_app_code_t:lnk_file { read write create getattr setattr lock append unlink link rename open };
-allow urados_root_t { urados_path_dir_t urados_root_dir_t urados_parent_dir_t }:dir { search getattr open };
+allow urados_root_t { urados_path_dir_t urados_parent_dir_t }:dir { search getattr open };
 
 ########################################
 # Confined app domain
@@ -163,7 +182,7 @@ allow urados_app_t urados_app_code_t:lnk_file { read write create getattr setatt
 allow urados_app_t urados_bin_user_t:file { getattr open read map execute execute_no_trans };
 allow urados_app_t urados_bin_user_t:dir { search getattr open read };
 allow urados_app_t urados_bin_user_t:lnk_file { getattr read };
-allow urados_app_t { urados_path_dir_t urados_root_dir_t urados_parent_dir_t }:dir { search getattr };
+allow urados_app_t { urados_path_dir_t urados_parent_dir_t }:dir { search getattr };
 allow urados_app_t urados_lib_t:dir { search getattr open read };
 allow urados_app_t urados_lib_t:file { getattr open read map execute execute_no_trans };
 allow urados_app_t urados_lib_link_t:lnk_file { read getattr };
@@ -175,7 +194,7 @@ allow urados_app_t self:process { fork sigchld };
 
 allow urados_user_t { urados_bin_user_t urados_app_prog_t }:file { getattr open read map execute execute_no_trans };
 allow urados_user_t { urados_bin_user_t urados_app_prog_t }:dir { search getattr };
-allow urados_user_t { urados_path_dir_t urados_root_dir_t urados_parent_dir_t }:dir { search getattr };
+allow urados_user_t { urados_path_dir_t urados_parent_dir_t }:dir { search getattr };
 allow urados_user_t var_run_t:dir search;
 allow urados_user_t urados_lib_t:dir { search getattr open read };
 allow urados_user_t urados_lib_t:file { getattr open read map execute execute_no_trans };
@@ -219,8 +238,8 @@ neverallow urados_launcher_t urados_app_home_t:lnk_file { read write create unli
 
 # User domain remains read/execute-only in its utility/package directories.
 neverallow urados_user_t { file_type -urados_bin_user_t -urados_app_prog_t -urados_lib_t }:file ~{ getattr open read map execute };
-neverallow urados_user_t { file_type -urados_bin_user_t -urados_app_prog_t -urados_path_dir_t -urados_root_dir_t -urados_parent_dir_t -urados_lib_t }:dir ~{ getattr search };
-neverallow urados_user_t { file_type -urados_bin_user_t -urados_app_prog_t -urados_path_dir_t -urados_root_dir_t -urados_parent_dir_t -urados_lib_link_t }:lnk_file *;
+neverallow urados_user_t { file_type -urados_bin_user_t -urados_app_prog_t -urados_path_dir_t -urados_parent_dir_t -urados_lib_t }:dir ~{ getattr search };
+neverallow urados_user_t { file_type -urados_bin_user_t -urados_app_prog_t -urados_path_dir_t -urados_parent_dir_t -urados_lib_link_t }:lnk_file *;
 neverallow urados_user_t { urados_app_base_t urados_app_parent_t urados_app_home_t urados_app_data_t urados_app_code_t }:{ file dir lnk_file } *;
 neverallow urados_user_t { domain -urados_user_t }:process ~{ sigchld };
 neverallow urados_user_t domain:process { transition dyntransition setexec setcurrent ptrace };
@@ -245,3 +264,15 @@ neverallow urados_user_t urados_ipc_t:lnk_file *;
 neverallow ~urados_user_t urados_ipc_t:file { read write append create unlink rename map execute };
 neverallow ~urados_user_t urados_ipc_t:dir { read write add_name remove_name search open getattr };
 neverallow ~urados_user_t urados_ipc_t:{ fifo_file sock_file } { read write append create unlink rename open };
+
+########################################
+# SELinux users
+########################################
+
+# SELinux users. A loadable module may declare them (verified with semodule on
+# the reference base policy); no separate base-policy snippet is needed. MLS
+# requires a level and range. Dynamic per-app users "<name>_u" are added at
+# install time by urpkg with role urados_app_r (see src/selinux.c).
+user urados_root_u roles { urados_root_r } level s0 range s0;
+user urados_user_u roles { urados_user_r } level s0 range s0;
+user urados_app_u  roles { urados_app_r }  level s0 range s0;
