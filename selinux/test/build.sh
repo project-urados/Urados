@@ -1,6 +1,6 @@
 #!/bin/sh
-# Compile the Urados policy module and a test-only stub for device base types.
-# Output artifacts are written to selinux/build/; this script never loads policy.
+# Compile the Urados policy module. Output artifacts are written to
+# selinux/build/; this script never loads policy.
 set -eu
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 SELINUX_DIR=$(CDPATH= cd -- "$HERE/.." && pwd)
@@ -22,11 +22,9 @@ done
 }
 mkdir -p "$OUT"
 cp "$SELINUX_DIR/urados.te" "$SELINUX_DIR/urados.fc" "$TMP/"
-cp "$HERE/device_stub.te" "$TMP/urados_device_stub.te"
 (
     cd "$TMP"
-    make -f "$DEVEL_MAKEFILE" urados.pp urados_device_stub.pp
+    make -f "$DEVEL_MAKEFILE" urados.pp
 )
 cp "$TMP/urados.pp" "$OUT/urados.pp"
-cp "$TMP/urados_device_stub.pp" "$OUT/urados_device_stub.pp"
-printf 'Built %s and test-only device stub in %s\n' "$OUT/urados.pp" "$OUT"
+printf 'Built %s\n' "$OUT/urados.pp"

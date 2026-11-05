@@ -76,10 +76,18 @@ int pkg_sel_policy(const char *root, char *out, size_t outlen)
 
 int pkg_sel_name(const char *app, char *out, size_t outlen)
 {
+    static const char *const reserved[] = PKG_SEL_RESERVED_USERS;
+    size_t i;
+
     if (!pkg_name_valid(app))
         return -1;
     if (snprintf(out, outlen, "%s%s", app, PKG_SEL_SUFFIX) >= (int)outlen)
         return -1;
+    /* Refuse names that would reuse a policy-defined Urados user. */
+    for (i = 0; i < PKG_SEL_RESERVED_COUNT; i++) {
+        if (strcmp(out, reserved[i]) == 0)
+            return -1;
+    }
     return 0;
 }
 

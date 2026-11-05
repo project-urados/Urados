@@ -375,6 +375,15 @@ int pkg_cmd_install(const char *source, const pkg_opts *o)
     }
     snprintf(name, sizeof(name), "%s", v.manifest.name);
     snprintf(archive_name, sizeof(archive_name), "%s%s", name, PKG_ARCHIVE_SUFFIX);
+    {
+        /* Reject before any lock, trusted copy or account is created. */
+        char reserved_check[PKG_SEL_USER_MAX];
+
+        if (pkg_sel_name(name, reserved_check, sizeof(reserved_check)) != 0) {
+            msg_err("app name '%s' is reserved or invalid for SELinux", name);
+            goto out;
+        }
+    }
 
     app_lock_fd = lock_app_at(locks_fd, name);
     if (app_lock_fd < 0) {

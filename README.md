@@ -78,7 +78,7 @@ For a device-oriented build that also compiles the policy:
 ./selinux/build.sh
 ```
 
-Loading policy changes the active policy on the machine and requires a device-specific prepared base policy. Do not use `--install-policy` on an unprepared host; see [`selinux/base/users.conf`](selinux/base/users.conf) and [`docs/APP-SANDBOX.md`](docs/APP-SANDBOX.md).
+Loading policy changes the active policy on the machine and requires root. The Urados module declares its own types, users, and roles, so it needs no hand-edited base-policy file. Do not use `--install-policy` on a host where the policy is not expected to change; see [`docs/APP-SANDBOX.md`](docs/APP-SANDBOX.md).
 
 ## Create and sign an app
 

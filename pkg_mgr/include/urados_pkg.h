@@ -88,6 +88,10 @@
 #define PKG_SEL_PREFIX   "user"
 #define PKG_SEL_ROLE     "urados_app_r"
 #define PKG_SEL_RANGE    "s0"
+/* SELinux users declared by the Urados policy module (selinux/urados.te).
+ * An app may never map onto one of them: that would give it admin rights. */
+#define PKG_SEL_RESERVED_USERS { "urados_root_u", "urados_user_u", "urados_app_u" }
+#define PKG_SEL_RESERVED_COUNT 3
 
 typedef struct {
     char name[PKG_NAME_MAX + 1];
