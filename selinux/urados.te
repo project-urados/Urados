@@ -12,6 +12,9 @@ require {
     attribute domain;
     attribute unconfined_domain_type;
     type security_t;
+    # MLS level/range on the user statements below refer to this sensitivity,
+    # so it must be declared here (checkmodule -M rejects undeclared levels).
+    sensitivity s0;
     type var_run_t;
     type proc_t;
     type usr_t;
@@ -206,7 +209,7 @@ allow urados_user_t urados_ipc_t:sock_file { create read write append getattr se
 allow urados_user_t urados_ipc_t:unix_stream_socket { create read write getattr setattr ioctl lock append bind connect listen accept getopt setopt shutdown connectto };
 allow urados_user_t urados_ipc_t:unix_dgram_socket { create read write getattr setattr ioctl lock append bind connect getopt setopt shutdown sendto };
 allow urados_user_t self:unix_stream_socket { create read write getattr setattr ioctl lock append bind connect listen accept getopt setopt shutdown connectto };
-allow urados_user_t self:unix_dgram_socket { create read write getattr setattr ioctl lock append bind connect listen accept getopt setopt shutdown sendto };
+allow urados_user_t self:unix_dgram_socket { create read write getattr setattr ioctl lock append bind connect getopt setopt shutdown sendto };
 allow urados_user_t self:process { fork sigchld };
 
 ########################################
