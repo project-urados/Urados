@@ -1,0 +1,11 @@
+module urados_device_stub 1.0;
+
+require {
+    attribute file_type;
+}
+
+type urados_root_dir_t;
+type urados_parent_dir_t;
+
+typeattribute urados_root_dir_t file_type;
+typeattribute urados_parent_dir_t file_type;
