@@ -83,7 +83,7 @@ typeattribute urados_root_exec_t file_type;
 ########################################
 # Roles and launch transitions
 ########################################
-
+role object_r;
 role urados_root_r;
 role urados_user_r;
 role urados_app_r;
