@@ -7,20 +7,12 @@ policy_module(urados, 1.0)
 # isolates each app's cache from every other app; SELinux denies execution from
 # ordinary data.
 
+# Only kernel-provided names are required here: the object classes and their
+# permissions, and the MLS sensitivity used by the user statements (checkmodule
+# -M rejects undeclared levels). Every other name this module uses is declared
+# in the module itself, so no base policy or device base is needed.
 require {
-    attribute file_type;
-    attribute domain;
-    attribute unconfined_domain_type;
-    type security_t;
-    # MLS level/range on the user statements below refer to this sensitivity,
-    # so it must be declared here (checkmodule -M rejects undeclared levels).
     sensitivity s0;
-    type var_run_t;
-    type proc_t;
-    type usr_t;
-    type lib_t;
-    type ld_so_t;
-    type textrel_shlib_t;
     class file { ioctl read write create getattr setattr lock append unlink link rename execute execute_no_trans entrypoint open map relabelfrom relabelto };
     class dir { ioctl read write create getattr setattr lock append unlink link rename add_name remove_name reparent search rmdir open relabelfrom relabelto };
     class lnk_file { read write create getattr setattr lock append unlink link rename open relabelfrom relabelto };
@@ -31,13 +23,6 @@ require {
     class process { fork transition dyntransition setcurrent setexec ptrace sigchld sigkill sigstop signull signal getsched setsched getpgid setpgid getsession getcap setcap getattr setrlimit share };
     class security { load_policy setenforce setbool setsecparam setcheckreqprot };
     class capability { setuid setgid };
-    # Base-policy process-constraint attributes. The launcher is granted them
-    # below so it can exec an app process whose SELinux user and role differ
-    # from its own. The constraint still requires the target to be
-    # process_user_target, which only urados_app_t is.
-    attribute can_change_process_identity;
-    attribute can_change_process_role;
-    attribute process_user_target;
 }
 
 ########################################
@@ -67,6 +52,29 @@ type urados_ipc_t;
 # labelled in urados.fc, so the app and user domains can reach /urados/bin/user
 # without any device-specific label.
 type urados_parent_dir_t;
+
+# Names the rules below depend on, which a reference base policy normally
+# supplies. The module declares them so it compiles without one. Types marked
+# file_type are the file objects the file rules cover. security_t and proc_t are
+# deliberately not file_type: root's file_type rules must not reach selinuxfs or
+# procfs control files.
+attribute domain;
+attribute file_type;
+attribute can_change_process_identity;
+attribute can_change_process_role;
+attribute process_user_target;
+type security_t;
+type proc_t;
+type usr_t;
+type var_run_t;
+type lib_t;
+type ld_so_t;
+type textrel_shlib_t;
+typeattribute usr_t file_type;
+typeattribute var_run_t file_type;
+typeattribute lib_t file_type;
+typeattribute ld_so_t file_type;
+typeattribute textrel_shlib_t file_type;
 
 typeattribute urados_root_t domain;
 typeattribute urados_user_t domain;
@@ -106,9 +114,10 @@ allow urados_launcher_t urados_app_t:process transition;
 type_transition urados_launcher_t urados_app_code_t:process urados_app_t;
 
 # The launcher execs an app process in a different SELinux user and role
-# (<name>_u:urados_app_r). The base constraints on process transitions allow
-# this only when the source has can_change_process_identity/_role and the
-# target is process_user_target. Nothing else is granted these attributes.
+# (<name>_u:urados_app_r). A base that constrains process transitions admits this
+# only when the source has can_change_process_identity/_role and the target is
+# process_user_target. A loadable module cannot write those constraints, so it
+# supplies only the attributes; nothing else is granted them.
 typeattribute urados_launcher_t can_change_process_identity;
 typeattribute urados_launcher_t can_change_process_role;
 typeattribute urados_app_t process_user_target;
@@ -272,10 +281,11 @@ neverallow ~urados_user_t urados_ipc_t:{ fifo_file sock_file } { read write appe
 # SELinux users
 ########################################
 
-# SELinux users. A loadable module may declare them (verified with semodule on
-# the reference base policy); no separate base-policy snippet is needed. MLS
-# requires a level and range. Dynamic per-app users "<name>_u" are added at
-# install time by urpkg with role urados_app_r (see src/selinux.c).
+# SELinux users are declared here, so no base-policy snippet is needed. MLS
+# requires a level and range. system_u is not declared: every base provides it,
+# and redeclaring it here could conflict with the base's roles and ranges.
+# Dynamic per-app users "<name>_u" are added at install time by urpkg with role
+# urados_app_r (see src/selinux.c).
 user urados_root_u roles { urados_root_r } level s0 range s0;
 user urados_user_u roles { urados_user_r } level s0 range s0;
 user urados_app_u  roles { urados_app_r }  level s0 range s0;
