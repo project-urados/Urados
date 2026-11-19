@@ -282,10 +282,11 @@ neverallow ~urados_user_t urados_ipc_t:{ fifo_file sock_file } { read write appe
 ########################################
 
 # SELinux users are declared here, so no base-policy snippet is needed. MLS
-# requires a level and range. system_u is not declared: every base provides it,
-# and redeclaring it here could conflict with the base's roles and ranges.
-# Dynamic per-app users "<name>_u" are added at install time by urpkg with role
-# urados_app_r (see src/selinux.c).
+# requires a level and range. system_u is declared because urados.fc labels
+# files as system_u:object_r, and a policy without a base has no other source
+# for that user. Dynamic per-app users "<name>_u" are added at install time by
+# urpkg with role urados_app_r (see src/selinux.c).
+user system_u roles { object_r } level s0 range s0;
 user urados_root_u roles { urados_root_r } level s0 range s0;
 user urados_user_u roles { urados_user_r } level s0 range s0;
 user urados_app_u  roles { urados_app_r }  level s0 range s0;
