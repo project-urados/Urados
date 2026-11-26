@@ -33,7 +33,7 @@ uinit:
 test: pkg_mgr
 	$(MAKE) -C $(PKG_MGR) test
 
-install: all
+install: pkg_mgr
 	install -d "$(DESTDIR)$(PREFIX)/bin"
 	for t in $(TOOLS); do \
 		install -m 0755 "$(PKG_MGR)/build/$$t" "$(DESTDIR)$(PREFIX)/bin/$$t" || exit 1; \

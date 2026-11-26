@@ -1,74 +1,48 @@
-%% Urados package and runtime flow
+%% Urados package-manager lifecycle
 %% Render with: manus-render-diagram docs/images/flow.mmd docs/images/flow.png
-flowchart TB
-    subgraph PUB[Publisher machine]
+flowchart LR
+    subgraph DEV[Publisher workstation]
         direction TB
-        SRC["App project\nmanifest.xml + app/*"]
-        KEY["Publisher private key\nRSA / EC / Ed25519"]
-        CERT["Publisher leaf + optional intermediates\nSIGNER_CERTS.pem"]
-        DEV["urdev check\nurdev pack"]
-        ZIP["Signed package.zip\nmanifest.xml\nSIGNER_CERTS.pem\nMETA-INF/MANIFEST.MF\nMETA-INF/CERT.SF\nMETA-INF/CERT.SIG\napp/*"]
-        SRC --> DEV
-        KEY --> DEV
-        CERT --> DEV
-        DEV --> ZIP
+        PROJECT["App project\nmanifest.xml + app/*"]
+        URDEV["urdev\ninit / check / keygen / csr / pack"]
+        KEY["Private signing key\nkept on workstation"]
+        CHAIN["Publisher leaf +\noptional intermediates"]
+        ZIP["Signed package ZIP\nSHA-256 metadata + signature"]
+        PROJECT --> URDEV
+        KEY --> URDEV
+        CHAIN --> URDEV
+        URDEV --> ZIP
     end
 
-    NET["Local path or HTTP(S)"]
-    ZIP --> NET
+    ZIP --> VERIFY["urpkg verify\nvalidate chain + package signature"]
 
-    subgraph DEVICE["Target device (root / administrator)"]
+    subgraph DEVICE[Target device]
         direction TB
-        ROOTS["/etc/urados/keys/*.crt\nAdministrator-installed CA roots"]
-        INSTALL["urpkg install\nverify chain + package metadata"]
-        TRUST["/data/app_progs/<name>.zip\nroot:root 0600\nper-app lock"]
-        ID["Create app identity\nUnix UID + users group"]
-        TREE["Create protected tree\n/data/app/<name>/data\n/data/app/<name>/system_cache\nper-UID ACLs + labels"]
-        NET --> INSTALL
-        ROOTS -. trust .-> INSTALL
-        INSTALL --> TRUST
+        ROOT["/etc/urados/keys/*.crt\nadministrator trust roots"]
+        INSTALL["urpkg install\nverify, reserve, extract"]
+        ARCHIVE["/data/app_progs/<name>.zip\nroot:root, 0600"]
+        ID["App UID + users group\nprotected data/cache ACLs"]
+        START["urpkg start <name>\nverify pinned archive"]
+        STAGE["Temporary extraction\nrehash payload"]
+        PUBLISH["Atomic publish\nsystem_cache/app"]
+        DROP["Fork child\ndrop UID/GID + no_new_privs"]
+        APP["Manifest entry\ncontrolled environment"]
+        ROOT -. trust .-> VERIFY
+        VERIFY --> INSTALL --> ARCHIVE
         INSTALL --> ID
-        INSTALL --> TREE
-        TRUST --> START
-        ID --> START
-        TREE --> START
-
-        subgraph START["urpkg start <name>"]
-            direction TB
-            LOCK["Acquire per-app lock"]
-            VERIFY["Open trusted archive without symlinks\nverify certificate + SHA-256 metadata"]
-            STAGE["Extract to temporary package-code tree\nrehash every payload byte"]
-            PUBLISH["Atomic exchange\nsystem_cache/app"]
-            RUNNER["Forked child: drop UID/GID\nno_new_privs, then exec entry"]
-            LOCK --> VERIFY --> STAGE --> PUBLISH --> RUNNER
-        end
+        ARCHIVE --> START --> STAGE --> PUBLISH --> DROP --> APP
+        ID --> DROP
     end
 
-    ROOTS -. "trust anchor only" .-> VERIFY
-    RUNNER --> DROP["Clear environment\nenter app data home"]
+    ZIP --> VERIFY
+    APP --> DATA["/data/<name>/data\napp-private writable data"]
+    APP --> CACHE["system_cache/user\nmutable app-created code"]
 
-    subgraph APP["Confined app process"]
-        direction TB
-        PROCESS["App entry point"]
-        DATA["/data/app/<name>/data\napp-private, UID ACL"]
-        CACHE["system_cache/app + system_cache/user\napp-private executable cache"]
-        UTILS["/urados/bin/user\ntrusted read-only utilities"]
-        PROCESS --> DATA
-        PROCESS --> CACHE
-        PROCESS --> UTILS
-    end
-
-    DROP --> PROCESS
-    PUBLISH -. "failed verify/extract leaves prior complete tree" .-> CACHE
-
-    classDef boundary fill:#fff8d9,stroke:#8a6d1d,color:#332b00,stroke-width:2px;
-    classDef command fill:#e8e4ff,stroke:#6656b3,color:#21194d,stroke-width:2px;
-    classDef storage fill:#e3f0ff,stroke:#3b6ea8,color:#132b45,stroke-width:2px;
-    classDef security fill:#e5f7ea,stroke:#2d7a46,color:#12351d,stroke-width:2px;
-    classDef app fill:#f5e8ff,stroke:#8050a8,color:#30153f,stroke-width:2px;
-
-    class PUB,DEVICE,START,APP boundary;
-    class DEV,INSTALL,VERIFY,LOCK,RUNNER command;
-    class ZIP,ROOTS,TRUST,TREE,STAGE,PUBLISH,DATA,CACHE,UTILS storage;
-    class ID,DROP,TRANSITION security;
-    class PROCESS app;
+    classDef command fill:#e6e0ff,stroke:#5e4aa8,stroke-width:2px;
+    classDef storage fill:#e2f0ff,stroke:#316b9e,stroke-width:2px;
+    classDef security fill:#e5f6e8,stroke:#2d7545,stroke-width:2px;
+    classDef process fill:#fff1d6,stroke:#a56b16,stroke-width:2px;
+    class PROJECT,KEY,CHAIN,ZIP,ROOT,ARCHIVE,DATA,CACHE storage;
+    class URDEV,VERIFY,INSTALL,START,STAGE,PUBLISH command;
+    class ID,DROP security;
+    class APP process;

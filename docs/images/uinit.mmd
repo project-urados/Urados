@@ -1,0 +1,34 @@
+%% Uinit boot and unit execution flow
+%% Render with: manus-render-diagram docs/images/uinit.mmd docs/images/uinit.png
+flowchart TB
+    KERNEL["Kernel starts /sbin/uinit\nas PID 1"] --> ARGS["Parse options\n--root, --check, -v"]
+    ARGS --> ID["Read identity\n/urados/etc/urados/init/id"]
+    ID --> ENTRY["Load entry unit\n/urados/etc/urados/init/hw/init.uinit"]
+    ENTRY --> PARSE["Parse unit statements\nlog / mount / run / exec / spawn"]
+    PARSE --> NEXT{Statement}
+    NEXT -->|run| CHILD["Load reachable child unit\nrelative to parent unit"]
+    CHILD --> PARSE
+    NEXT -->|mount| MOUNT["Resolve NONE, LABEL, UUID,\nor PARTNUM source"]
+    MOUNT --> MOUNT_RESULT{Optional?}
+    MOUNT_RESULT -->|yes, failure| LOG["Log failure\nand continue"]
+    MOUNT_RESULT -->|no, success| NEXT
+    MOUNT_RESULT -->|no, failure| FAIL["Stop boot\nreturn failure"]
+    NEXT -->|exec| EXEC["Fork, set groups/user,\nset no_new_privs, exec; wait"]
+    NEXT -->|spawn| SPAWN["Fork, set groups/user,\nset no_new_privs, exec; continue"]
+    EXEC --> NEXT
+    SPAWN --> NEXT
+    NEXT -->|end| BOOT{--check or PID 1?}
+    BOOT -->|--check| OK["Return 0\nno mounts or commands run"]
+    BOOT -->|normal process| EXIT["Return entry-unit status"]
+    BOOT -->|PID 1| REAP["Supervise and reap\norphaned children forever"]
+
+    classDef input fill:#e3f0ff,stroke:#316b9e,stroke-width:2px;
+    classDef parse fill:#e8e2ff,stroke:#5f4ba9,stroke-width:2px;
+    classDef action fill:#fff0d5,stroke:#a56b16,stroke-width:2px;
+    classDef security fill:#e4f6e8,stroke:#2d7545,stroke-width:2px;
+    classDef result fill:#f3e5f7,stroke:#7b4b91,stroke-width:2px;
+    class KERNEL,ARGS,ID,ENTRY input;
+    class PARSE,NEXT,CHILD,BOOT parse;
+    class MOUNT,MOUNT_RESULT,EXEC,SPAWN action;
+    class LOG,FAIL,REAP security;
+    class OK,EXIT result;

@@ -4,14 +4,17 @@ Urados is a full operating system built around a secure, native Linux applicatio
 
 The creators of Urados also offer selected parts of the operating system as open-source software under the name **Urados Open Source Software (UOSS)**. UOSS lets you integrate useful Urados components—such as package management, signing, application sandboxing, policy, and supporting system utilities—into another operating system or existing product without adopting the entire Urados OS. The availability and license of each component are defined by the component’s source repository and license.
 
-It provides two command-line tools:
+It provides two system components and three primary binaries:
 
 - `urdev` creates an app project, validates its manifest, generates signing material or a CSR, and builds a signed package.
 - `urpkg` verifies, installs, and starts signed packages on a device.
+- `uinit` is the native init system. It can run as PID 1 or validate and boot a staged root during development.
 
 At runtime, each app gets its own Unix UID and a folder named after the app. POSIX ACLs isolate writable data and executable cache content between apps. App names are restricted to `[a-z_][a-z0-9_-]*` (at most 32 bytes) so they are safe as both user names and ext4 file and folder names.
 
-![Urados package and runtime flow](docs/images/flow.png)
+![Urados package-manager lifecycle](docs/images/flow.png)
+
+![Uinit boot and unit execution flow](docs/images/uinit.png)
 
 ## Status and scope
 
@@ -43,23 +46,38 @@ A failed verification or extraction does not replace the previous complete packa
 | `pkg_mgr/src/` | C implementation of `urpkg`, `urdev`, packaging, verification, extraction, and app launch. |
 | `pkg_mgr/include/` | Shared package-manager definitions and public internal interfaces. |
 | `pkg_mgr/tests/` | Certificate, extraction-limit, and staged end-to-end tests. |
+| `init/src/` | Uinit boot, unit parsing, mounts, process execution, and supervision. |
+| `init/include/` | Uinit public internal definitions and paths. |
+| `init/tests/` | Uinit parser, staged boot, identity, mount, and PID 1 tests. |
+| `init/examples/` | Example identity file and unit tree for `make -C init check-example`. |
 | `ipc/setup-ipc-user.sh` | Creates the optional group-owned IPC runtime directory. |
 | `docs/APP-SANDBOX.md` | Detailed filesystem, ACL, process, and migration model. |
 | `docs/CODE-SIGNING.md` | Publisher, CA operator, and device administrator signing workflow. |
-| `docs/BUILD.md` | Distribution-specific build dependencies and test prerequisites. |
+| `docs/BUILD.md` | Dependencies, build modes, tests, installation, and static Uinit linking. |
+| `docs/PACKAGE-MANAGER.md` | `urdev` and `urpkg` workflow, commands, package format, and trust setup. |
+| `docs/UINIT.md` | Uinit boot layout, unit syntax, options, tests, and integration checklist. |
 
 ## Build requirements
 
-Urados is written in C11 and uses `make`, `pkg-config`, libxml2, libzip, libcurl, OpenSSL 3, and libacl. Install the platform-specific development packages described in [`docs/BUILD.md`](docs/BUILD.md), then build:
+Urados is written in C11. Install the platform-specific development packages described in [`docs/BUILD.md`](docs/BUILD.md), then choose a build:
 
 ```sh
-make -j2
+make -j2              # package manager and Uinit
+make pkg_mgr -j2      # urpkg and urdev only
+make uinit -j2        # Uinit only
 ```
 
-The resulting binaries are placed in `pkg_mgr/build/`:
+The resulting binaries are placed in:
 
-- `urpkg` — device package manager
-- `urdev` — developer and publisher tool
+- `pkg_mgr/build/urpkg` — device package manager
+- `pkg_mgr/build/urdev` — developer and publisher tool
+- `init/build/uinit` — init system
+
+To statically link one `pkg-config` library and its dependencies into Uinit only:
+
+```sh
+make uinit STATIC_LIB=blkid
+```
 
 To install the tools using the top-level Makefile:
 
@@ -139,7 +157,7 @@ The design deliberately supports mutable app-created code in `system_cache/user`
 
 ## Tests
 
-Build and run the certificate and staged end-to-end suites with:
+Build and run the package-manager certificate and staged end-to-end suites with:
 
 ```sh
 make test
@@ -149,12 +167,27 @@ The end-to-end suite additionally needs passwordless `sudo` and ACL utilities su
 
 Passing staged tests does not prove the layout on a device. On the target, verify that each app runs as its own UID, and that one app cannot read or write another app’s data or cache.
 
+Run the Uinit parser, staged boot, identity, mount, and PID 1 tests with:
+
+```sh
+make -C init test
+```
+
+For a configuration-only check that performs no mounts or commands:
+
+```sh
+make -C init check-example
+```
+
 ## Documentation
 
 - [Building Urados](docs/BUILD.md)
+- [Package manager and developer tools](docs/PACKAGE-MANAGER.md)
+- [Uinit init system](docs/UINIT.md)
 - [App filesystem and execution model](docs/APP-SANDBOX.md)
 - [X.509 package signing](docs/CODE-SIGNING.md)
-- [Package and runtime flow](docs/images/flow.png)
+- [Package-manager lifecycle diagram](docs/images/flow.png)
+- [Uinit boot-flow diagram](docs/images/uinit.png)
 
 ## License
 
