@@ -1,26 +1,34 @@
-# Top-level build for Urados. Builds every tool so that nothing has to be
-# compiled from inside a subdirectory.
+# Top-level build for Urados. Builds the package manager and init system so
+# that nothing has to be compiled from inside a subdirectory.
 #
-#   make              build urpkg and urdev
+#   make              build the package manager and Uinit
+#   make pkg_mgr      build only urpkg and urdev
+#   make uinit        build only Uinit
 #   make test         build, then run the end-to-end suite (needs passwordless
 #                     sudo; see pkg_mgr/tests/test_e2e.sh)
 #   make install      install urpkg and urdev into $(DESTDIR)$(PREFIX)/bin
-#   make clean        remove all build output
+#   make clean        remove all package-manager and Uinit build output
 #
-# Requirements: gcc, pkg-config, and the development files for libxml-2.0,
-# libzip, libcurl, OpenSSL 3 and libacl. If any are
-# missing, the package-manager Makefile stops before starting parallel compiles.
+# Requirements: see pkg_mgr/Makefile and init/Makefile for the dependencies of
+# each component. A target only checks the dependencies of the component it
+# builds.
 
 PREFIX  ?= /usr/local
 DESTDIR ?=
 
 PKG_MGR = pkg_mgr
+INIT    = init
 TOOLS   = urpkg urdev
 
-all:
+all: pkg_mgr uinit
+
+pkg_mgr:
 	$(MAKE) -C $(PKG_MGR) all
 
-test: all
+uinit:
+	$(MAKE) -C $(INIT) all
+
+test: pkg_mgr
 	$(MAKE) -C $(PKG_MGR) test
 
 install: all
@@ -31,5 +39,6 @@ install: all
 
 clean:
 	$(MAKE) -C $(PKG_MGR) clean
+	$(MAKE) -C $(INIT) clean
 
-.PHONY: all test install clean
+.PHONY: all pkg_mgr uinit test install clean
