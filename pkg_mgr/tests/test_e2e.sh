@@ -12,7 +12,6 @@ T="$B/test"
 ROOT="$T/root"
 URPKG="$B/urpkg"
 URDEV="$B/urdev"
-APPRESTORECON="$B/apprestorecon"
 PASS=0
 FAIL=0
 
@@ -37,19 +36,12 @@ stat_of()   { sudo -n stat -c '%u:%g %a' "$1"; }
 
 echo "== build"
 make -C "$HERE" all >/dev/null
-sh "$HERE/../selinux/test/build.sh" >/dev/null
 sudo -n true
 command -v getfacl >/dev/null 2>&1 || { echo "E2E tests require getfacl (acl package)" >&2; exit 1; }
 
 echo "== prepare"
-# A failed run may have left the staged SELinux store locked; unlock it.
-if [ -d "$ROOT/var/lib/selinux/default/active" ]; then
-    sudo -n python3 "$HERE/tests/lockflag.py" clear "$ROOT/var/lib/selinux/default/active"
-fi
 sudo -n rm -rf "$T"
 mkdir -p "$T"
-# Host SELinux store checksums, to prove that the suite never writes to it.
-sudo -n md5sum /var/lib/selinux/default/active/seusers /var/lib/selinux/default/active/users_extra | sort >"$T/host-sel.md5"
 "$URDEV" keygen "$T/dev.pem" "$T/dev.pub" --no-passphrase >/dev/null
 "$URDEV" keygen "$T/rogue.pem" "$T/rogue.pub" --no-passphrase >/dev/null
 openssl req -x509 -newkey rsa:2048 -nodes -keyout "$T/root.key" -out "$T/root.crt" \
@@ -81,18 +73,6 @@ printf 'root:!::\nusers:!::\nextras:!::\n' | sudo -n tee "$ROOT/etc/gshadow" >/d
 sudo -n chmod 600 "$ROOT/etc/shadow" "$ROOT/etc/gshadow"
 sudo -n cp "$T/root.crt" "$ROOT/etc/urados/keys/test-root.crt"
 
-# SELinux: a private copy of the policy store. libsemanage writes only under
-# $ROOT (semanage_set_root), so the host store is never modified.
-[ -f /etc/selinux/config ] || { echo "the suite needs an SELinux policy store at /etc/selinux" >&2; exit 1; }
-sudo -n cp -a /etc/selinux "$ROOT/etc/selinux"
-sudo -n mkdir -p "$ROOT/var/lib"
-sudo -n cp -a /var/lib/selinux "$ROOT/var/lib/selinux"
-# Add Urados labels to the private staged file-context database used by
-# apprestorecon; the host policy store is never changed.
-sudo -n sh -c 'cat "$1" >>"$2"' sh "$HERE/../selinux/urados.fc" \
-    "$ROOT/etc/selinux/default/contexts/files/file_contexts"
-sudo -n semodule -n -p "$ROOT" -s default -i \
-    "$HERE/../selinux/build/urados.pp" >/dev/null
 
 "$URDEV" init "$T/notes" notes 1.0.0 >/dev/null
 expect_eq "new scripts target the trusted BusyBox shell" "#!/urados/bin/user/sh" "$(head -n 1 "$T/notes/app/notes")"
@@ -141,16 +121,16 @@ expect_fail "untrusted package is refused at install" sudo -n "$URPKG" --root "$
 expect_eq "refused install creates no account" "0" "$(sudo -n grep -c '^other:' "$ROOT/etc/passwd" || true)"
 expect_eq "refused install leaves no app directory" "no" "$(sudo -n test -e "$ROOT/data/app/other" && echo yes || echo no)"
 
-# An app named like a policy-defined Urados SELinux user must be refused before
-# any account, trusted copy or app directory is created.
-"$URDEV" init "$T/urados_root" urados_root 1.0.0 >/dev/null
-cp "$T/probe" "$T/urados_root/app/urados_root"
-"$URDEV" pack "$T/urados_root" "$T/urados_root-1.0.0.zip" --key "$T/company.key" --cert "$T/company-chain.pem" >/dev/null
-expect_fail "app named urados_root is refused (reserved SELinux user)" sudo -n "$URPKG" --root "$ROOT" install "$T/urados_root-1.0.0.zip"
-expect_eq "reserved-name install creates no account" "0" "$(sudo -n grep -c '^urados_root:' "$ROOT/etc/passwd" || true)"
-expect_eq "reserved-name install leaves no trusted copy" "no" "$(sudo -n test -e "$ROOT/data/app_progs/urados_root.zip" && echo yes || echo no)"
-expect_eq "reserved-name install leaves no app directory" "no" "$(sudo -n test -e "$ROOT/data/app/urados_root" && echo yes || echo no)"
-expect_eq "reserved-name install is rejected with a clear message" "1" "$(grep -c 'reserved or invalid for SELinux' "$T/last.log" || true)"
+# App names are user names and ext4 folder/file names. Anything outside
+# [a-z_][a-z0-9_-]* (up to 32 bytes) must be refused before any account,
+# trusted copy or app directory is created.
+for bad in "Notes" "no/tes" "no.tes" "../notes" "no tes" ".notes" "9notes"; do
+    rm -rf "$T/badname"
+    expect_fail "urdev init refuses app name '$bad'" "$URDEV" init "$T/badname" "$bad" 1.0.0
+done
+expect_fail "urdev init refuses a name longer than 32 bytes" \
+    "$URDEV" init "$T/badname" "$(printf 'a%.0s' $(seq 1 33))" 1.0.0
+rm -rf "$T/badname"
 expect_ok "install a signed package" sudo -n "$URPKG" --root "$ROOT" install "$T/notes-1.0.0.zip"
 expect_fail "reinstalling the same package is refused" sudo -n "$URPKG" --root "$ROOT" install "$T/notes-1.0.0.zip"
 
@@ -177,28 +157,22 @@ expect_eq "package code ACL grants this app RWX" "1" "$(sudo -n getfacl -cp "$RO
 expect_eq "generated-code folder is root:users setgid 2770" "0:$USERS_GID 2770" "$(stat_of "$ROOT/data/app/notes/system_cache/user")"
 expect_eq "staging area is empty after install" "0" "$(sudo -n ls -A "$ROOT/data/app_progs/.staging" | wc -l)"
 
-echo "== install (SELinux)"
-SEL_USERS="$ROOT/var/lib/selinux/default/active/users_extra"
-SEL_LOGINS="$ROOT/var/lib/selinux/default/active/seusers"
-expect_eq "SELinux user notes_u is defined" "1" "$(sudo -n grep -c '^user notes_u ' "$SEL_USERS" || true)"
-expect_eq "login notes maps to SELinux user notes_u" "1" "$(sudo -n grep -c '^notes:notes_u:s0$' "$SEL_LOGINS" || true)"
-expect_ok "apprestorecon labels the separate data and mutable-code trees" \
-    sudo -n "$APPRESTORECON" --root "$ROOT" notes
+echo "== install (account and confinement)"
+expect_eq "app account has no login shell" "/usr/sbin/nologin" "$(awk -F: '$1=="notes"{print $7}' "$ROOT/etc/passwd")"
+expect_eq "app account home is its data home" "/data/app/notes/data" "$(awk -F: '$1=="notes"{print $6}' "$ROOT/etc/passwd")"
 
-# A store that cannot be written must fail the install and leave nothing behind.
-sudo -n python3 "$HERE/tests/lockflag.py" set "$ROOT/var/lib/selinux/default/active"
+# A leftover app directory is refused by the up-front "already exists" check,
+# before any account or trusted copy is created. The refusal must not remove it.
+expect_ok "a leftover /data/app/other directory exists" sudo -n mkdir -p "$ROOT/data/app/other/data"
 set +e
-sudo -n "$URPKG" --root "$ROOT" install "$T/other-1.0.0.zip" >"$T/locked.log" 2>&1
+sudo -n "$URPKG" --root "$ROOT" install "$T/other-1.0.0.zip" >"$T/leftover.log" 2>&1
 RC=$?
 set -e
-sudo -n python3 "$HERE/tests/lockflag.py" clear "$ROOT/var/lib/selinux/default/active"
-expect_eq "install fails when the SELinux store is locked" "1" "$([ "$RC" -ne 0 ] && echo 1 || echo 0)"
-expect_eq "the failure comes from the SELinux step" "1" "$(grep -c 'SELinux' "$T/locked.log" || true)"
-expect_eq "failed SELinux install leaves no account" "0" "$(sudo -n grep -c '^other:' "$ROOT/etc/passwd" || true)"
-expect_eq "failed SELinux install leaves no SELinux user" "0" "$(sudo -n grep -c '^user other_u ' "$SEL_USERS" || true)"
-expect_eq "failed SELinux install leaves no login mapping" "0" "$(sudo -n grep -c '^other:' "$SEL_LOGINS" || true)"
-expect_eq "failed SELinux install leaves no app directory" "no" "$(sudo -n test -e "$ROOT/data/app/other" && echo yes || echo no)"
-expect_eq "failed SELinux install leaves no trusted copy" "no" "$(sudo -n test -e "$ROOT/data/app_progs/other.zip" && echo yes || echo no)"
+expect_eq "refused install keeps the pre-existing app directory" "yes" "$(sudo -n test -d "$ROOT/data/app/other/data" && echo yes || echo no)"
+sudo -n rm -rf "$ROOT/data/app/other"
+expect_eq "install is refused when the app directory already exists" "1" "$([ "$RC" -ne 0 ] && echo 1 || echo 0)"
+expect_eq "refused install leaves no account" "0" "$(sudo -n grep -c '^other:' "$ROOT/etc/passwd" || true)"
+expect_eq "refused install leaves no trusted copy" "no" "$(sudo -n test -e "$ROOT/data/app_progs/other.zip" && echo yes || echo no)"
 
 echo "== start (app user)"
 APP_UID=$(awk -F: '$1=="notes"{print $3}' "$ROOT/etc/passwd")
@@ -217,6 +191,7 @@ expect_eq "entry cannot rename system_cache" "1" "$(grep -c '^rename_cache=denie
 expect_eq "entry can read its own package code" "1" "$(grep -c '^read_extra=ok' "$T/run.log")"
 expect_eq "entry can execute generated code in its own cache" "1" "$(grep -c '^cache_generated_exec=ok' "$T/run.log")"
 expect_eq "entry cannot regain root" "1" "$(grep -c '^setuid0=denied' "$T/run.log")"
+expect_eq "entry runs with no_new_privs set" "1" "$(grep -c '^no_new_privs=1$' "$T/run.log")"
 expect_eq "entry can write its own data" "1" "$(grep -c '^data_write=ok' "$T/run.log")"
 expect_eq "probe reports PASS" "1" "$(grep -c '^probe=PASS' "$T/run.log")"
 expect_eq "data file is owned by the app user" "$NOTES_UID" "$(sudo -n stat -c '%u' "$ROOT/data/app/notes/data/probe-data.txt")"

@@ -1,7 +1,7 @@
 #!/bin/sh
 # Create the Urados user IPC rundir: /run/ipc/user
 #
-# Access model (see selinux/urados.te, rule 6):
+# Access model:
 #   - Only members of the group 'users' may use the rundir (mode 2770, setgid).
 #   - No communication method is imposed: files, FIFOs, UNIX sockets and
 #     shared mappings are all allowed, so developers can layer their own

@@ -25,6 +25,7 @@
 #include <string.h>
 #include <sys/file.h>
 #include <sys/ioctl.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -317,10 +318,8 @@ int pkg_cmd_install(const char *source, const pkg_opts *o)
     int tfd, rc = 1;
     uid_t uid = 0, pgid = 0;
     gid_t usersgid = 0;
-    pkg_sel_state sel;
 
     memset(&v, 0, sizeof(v));
-    memset(&sel, 0, sizeof(sel));
     archive_name[0] = '\0';
     if (require_root() != 0)
         return 1;
@@ -375,15 +374,6 @@ int pkg_cmd_install(const char *source, const pkg_opts *o)
     }
     snprintf(name, sizeof(name), "%s", v.manifest.name);
     snprintf(archive_name, sizeof(archive_name), "%s%s", name, PKG_ARCHIVE_SUFFIX);
-    {
-        /* Reject before any lock, trusted copy or account is created. */
-        char reserved_check[PKG_SEL_USER_MAX];
-
-        if (pkg_sel_name(name, reserved_check, sizeof(reserved_check)) != 0) {
-            msg_err("app name '%s' is reserved or invalid for SELinux", name);
-            goto out;
-        }
-    }
 
     app_lock_fd = lock_app_at(locks_fd, name);
     if (app_lock_fd < 0) {
@@ -443,17 +433,7 @@ int pkg_cmd_install(const char *source, const pkg_opts *o)
                 name, (unsigned)uid, APP_UID_MIN);
         goto out;
     }
-    /*
-     * 3. SELinux: SELinux user <name>_u, and the login <name> mapped to it.
-     * On failure pkg_sel_register undoes its own partial work. The rollback
-     * below undoes the rest, using the record of what was added.
-     */
-    if (pkg_sel_register(o, name, &sel, err, sizeof(err)) != 0) {
-        msg_err("%s", err);
-        goto out;
-    }
-
-    /* 4. Protect the app parent so the app cannot replace system_cache. */
+    /* 3. Protect the app parent so the app cannot replace system_cache. */
     app_made = 1;
     app_fd = pkg_open_subdir(appdata_fd, name, APP_DIR_MODE, 0, usersgid);
     if (app_fd < 0) {
@@ -492,23 +472,18 @@ int pkg_cmd_install(const char *source, const pkg_opts *o)
         goto out;
     }
 
-    printf("installed %s %s: app user '%s' (uid %u), SELinux user '%s_u', data in %s\n",
-           v.manifest.name, v.manifest.version, name, (unsigned)uid, name, home);
+    printf("installed %s %s: app user '%s' (uid %u), data in %s\n",
+           v.manifest.name, v.manifest.version, name, (unsigned)uid, home);
     rc = 0;
 
 out:
     if (rc != 0) {
-        char uerr[512] = "";
-
         if (app_made)
             pkg_rm_entry_at(appdata_fd, name, 0);
         if (trusted_copy_made)
             unlinkat(progs_fd, archive_name, 0);
-        if (acct_made) {
-            if (pkg_sel_unregister(o, name, &sel, uerr, sizeof(uerr)) != 0)
-                msg_err("%s", uerr);
+        if (acct_made)
             remove_account(o, name);
-        }
     }
     if (staged && stage_fd >= 0)
         unlinkat(stage_fd, stage_name, 0);
@@ -528,88 +503,62 @@ out:
     return rc;
 }
 
-/* Runs an app under its account. Production uses the SELinux-transitioning
- * helper; --root staging runs keep the direct path for E2E tests. */
+/*
+ * Runs an app under its own account. The forked child is the only process that
+ * holds root, and it gives that up irreversibly before exec:
+ *   1. --root staging only: chroot into the staging tree;
+ *   2. supplementary groups = {users}, then setgid, then setuid;
+ *   3. confirm root cannot be regained;
+ *   4. set no_new_privs, so setuid/setgid binaries cannot raise privilege;
+ *   5. enter the app data home, clear the environment, exec the entry.
+ * no_new_privs is a plain kernel flag; no MAC policy is involved.
+ */
 static int run_entry(const pkg_opts *o, const char *name, uid_t uid, gid_t gid,
                      const char *entry, int argc, char **argv)
 {
-    char home[PKG_PATH_MAX], path[PKG_PATH_MAX], seluser[PKG_SEL_USER_MAX];
-    char uidbuf[32], gidbuf[32], countbuf[32], groupbuf[PKG_GROUPS_MAX][32];
+    char home[PKG_PATH_MAX], path[PKG_PATH_MAX];
     char userenv[PKG_NAME_MAX + 8], homeenv[PKG_PATH_MAX + 8];
-    char *app_argv[PKG_ARGS_MAX + 2], *run_argv[PKG_GROUPS_MAX + PKG_ARGS_MAX + 12];
+    char *app_argv[PKG_ARGS_MAX + 2];
     char *envp[] = { "PATH=" PKG_USER_UTILS, userenv, homeenv, "LANG=C", NULL };
-    gid_t groups[PKG_GROUPS_MAX];
-    size_t ngroups = 0, i;
-    int n = 0, rn = 0, status = 0;
+    gid_t groups[1];
+    int n = 0, i, status = 0;
     pid_t pid;
 
     if (argc > PKG_ARGS_MAX) {
         msg_err("too many arguments (max %d)", PKG_ARGS_MAX);
         return -1;
     }
-    /* App processes receive exactly their shared primary users group; do not
-     * inherit unrelated supplementary groups from host account configuration. */
+    /* The app process gets exactly its shared users group, nothing else from
+     * host account configuration. */
     groups[0] = gid;
-    ngroups = 1;
-    if (pkg_sel_name(name, seluser, sizeof(seluser)) != 0) {
-        msg_err("cannot construct SELinux user for '%s'", name);
-        return -1;
-    }
-    snprintf(home, sizeof(home), "%s/%s/%s", PKG_APPDATA_DIR, name,
-             PKG_APP_DATA_SUBDIR);
+    snprintf(home, sizeof(home), "%s/%s/%s", PKG_APPDATA_DIR, name, PKG_APP_DATA_SUBDIR);
     snprintf(path, sizeof(path), "%s/%s/%s", PKG_APPDATA_DIR, name, entry);
     snprintf(userenv, sizeof(userenv), "USER=%s", name);
     snprintf(homeenv, sizeof(homeenv), "HOME=%s", home);
     app_argv[n++] = path;
-    for (i = 0; i < (size_t)argc; i++)
+    for (i = 0; i < argc; i++)
         app_argv[n++] = argv[i];
     app_argv[n] = NULL;
 
-    if (o->root[0] != '\0') {
-        /* Staging chroots have no active Urados SELinux policy; this path is
-         * used only by the integration test's synthetic root. */
-        pid = fork();
-        if (pid < 0) {
-            msg_err("fork failed: %s", strerror(errno));
-            return -1;
-        }
-        if (pid == 0) {
-            if (chroot(o->root) != 0 || chdir(home) != 0 ||
-                setgroups(ngroups, groups) != 0 || setgid(gid) != 0 || setuid(uid) != 0)
-                _exit(125);
-            if (setuid(0) == 0)
-                _exit(125);
-            umask(0077);
-            execve(path, app_argv, envp);
-            _exit(127);
-        }
-    } else {
-        snprintf(uidbuf, sizeof(uidbuf), "%lu", (unsigned long)uid);
-        snprintf(gidbuf, sizeof(gidbuf), "%lu", (unsigned long)gid);
-        snprintf(countbuf, sizeof(countbuf), "%lu", (unsigned long)ngroups);
-        run_argv[rn++] = PKG_RUNNER_PATH;
-        run_argv[rn++] = uidbuf;
-        run_argv[rn++] = gidbuf;
-        run_argv[rn++] = countbuf;
-        for (i = 0; i < ngroups; i++) {
-            snprintf(groupbuf[i], sizeof(groupbuf[i]), "%lu", (unsigned long)groups[i]);
-            run_argv[rn++] = groupbuf[i];
-        }
-        run_argv[rn++] = seluser;
-        run_argv[rn++] = home;
-        run_argv[rn++] = path;
-        for (i = 0; i < (size_t)argc; i++)
-            run_argv[rn++] = argv[i];
-        run_argv[rn] = NULL;
-        pid = fork();
-        if (pid < 0) {
-            msg_err("fork failed: %s", strerror(errno));
-            return -1;
-        }
-        if (pid == 0) {
-            execv(PKG_RUNNER_PATH, run_argv);
-            _exit(127);
-        }
+    pid = fork();
+    if (pid < 0) {
+        msg_err("fork failed: %s", strerror(errno));
+        return -1;
+    }
+    if (pid == 0) {
+        if ((o->root[0] != '\0' && chroot(o->root) != 0) ||
+            setgroups(1, groups) != 0 || setgid(gid) != 0 || setuid(uid) != 0)
+            _exit(125);
+        /* Root must be unrecoverable: setuid(0) has to fail. */
+        if (setuid(0) == 0)
+            _exit(125);
+        if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0)
+            _exit(125);
+        if (chdir(home) != 0)
+            _exit(125);
+        umask(0077);
+        execve(path, app_argv, envp);
+        _exit(127);
     }
     while (waitpid(pid, &status, 0) < 0) {
         if (errno != EINTR) {
@@ -621,7 +570,7 @@ static int run_entry(const pkg_opts *o, const char *name, uid_t uid, gid_t gid,
         int code = WEXITSTATUS(status);
 
         if (code == 125)
-            msg_err("could not establish the confined app context for '%s'", name);
+            msg_err("could not switch '%s' to its app account or confine it", name);
         else if (code == 127)
             msg_err("cannot execute %s", entry);
         return code;

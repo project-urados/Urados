@@ -1,5 +1,5 @@
 #!/bin/sh
-# Certificate-signing tests; independent of the SELinux install staging tests.
+# Certificate-signing tests; independent of the install staging tests.
 set -eu
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 B="$HERE/build"

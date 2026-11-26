@@ -22,7 +22,7 @@ flowchart TB
         ROOTS["/etc/urados/keys/*.crt\nAdministrator-installed CA roots"]
         INSTALL["urpkg install\nverify chain + package metadata"]
         TRUST["/data/app_progs/<name>.zip\nroot:root 0600\nper-app lock"]
-        ID["Create app identity\nUnix UID + users group\nSELinux user <name>_u"]
+        ID["Create app identity\nUnix UID + users group"]
         TREE["Create protected tree\n/data/app/<name>/data\n/data/app/<name>/system_cache\nper-UID ACLs + labels"]
         NET --> INSTALL
         ROOTS -. trust .-> INSTALL
@@ -39,19 +39,18 @@ flowchart TB
             VERIFY["Open trusted archive without symlinks\nverify certificate + SHA-256 metadata"]
             STAGE["Extract to temporary package-code tree\nrehash every payload byte"]
             PUBLISH["Atomic exchange\nsystem_cache/app"]
-            RUNNER["/urados/bin/urapp-runner"]
+            RUNNER["Forked child: drop UID/GID\nno_new_privs, then exec entry"]
             LOCK --> VERIFY --> STAGE --> PUBLISH --> RUNNER
         end
     end
 
     ROOTS -. "trust anchor only" .-> VERIFY
-    RUNNER --> DROP["Drop UID/GID\nclear environment\nenter app data home"]
-    DROP --> TRANSITION["SELinux enforcing required\ntransition to urados_app_t"]
+    RUNNER --> DROP["Clear environment\nenter app data home"]
 
     subgraph APP["Confined app process"]
         direction TB
         PROCESS["App entry point"]
-        DATA["/data/app/<name>/data\napp-writable, non-executable"]
+        DATA["/data/app/<name>/data\napp-private, UID ACL"]
         CACHE["system_cache/app + system_cache/user\napp-private executable cache"]
         UTILS["/urados/bin/user\ntrusted read-only utilities"]
         PROCESS --> DATA
@@ -59,7 +58,7 @@ flowchart TB
         PROCESS --> UTILS
     end
 
-    TRANSITION --> PROCESS
+    DROP --> PROCESS
     PUBLISH -. "failed verify/extract leaves prior complete tree" .-> CACHE
 
     classDef boundary fill:#fff8d9,stroke:#8a6d1d,color:#332b00,stroke-width:2px;

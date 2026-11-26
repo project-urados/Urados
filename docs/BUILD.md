@@ -1,8 +1,8 @@
 # Building Urados
 
 Urados is a native C project. The compiler needs the development headers and
-`pkg-config` metadata for libxml2, libzip, libcurl, OpenSSL, libselinux,
-libsemanage, and libacl. Runtime libraries alone are not enough.
+`pkg-config` metadata for libxml2, libzip, libcurl, OpenSSL, and libacl.
+Runtime libraries alone are not enough.
 
 ## Debian 13/Trixie, including ChromeOS Crostini
 
@@ -11,7 +11,7 @@ sudo apt update
 sudo apt install \
   build-essential pkg-config \
   libxml2-dev libzip-dev libcurl4-openssl-dev libssl-dev \
-  libselinux1-dev libsemanage-dev libacl1-dev
+  libacl1-dev
 ```
 
 Then build with:
@@ -26,19 +26,12 @@ instead of starting parallel compiler jobs with incomplete flags.
 
 ## Ubuntu
 
-On older Ubuntu releases, the SELinux management development package is named
-`libsemanage1-dev`:
-
 ```sh
 sudo apt update
 sudo apt install \
   build-essential pkg-config \
-  libxml2-dev libzip-dev libcurl4-openssl-dev libssl-dev \
-  libselinux1-dev libsemanage1-dev libacl1-dev
+  libxml2-dev libzip-dev libcurl4-openssl-dev libssl-dev libacl1-dev
 ```
-
-If `libsemanage1-dev` is not available on a newer Ubuntu release, use
-`libsemanage-dev` instead.
 
 ## Fedora or RHEL-like systems
 
@@ -46,21 +39,15 @@ If `libsemanage1-dev` is not available on a newer Ubuntu release, use
 sudo dnf install \
   gcc make pkgconf-pkg-config \
   libxml2-devel libzip-devel libcurl-devel openssl-devel \
-  libselinux-devel libsemanage-devel libacl-devel
+  libacl-devel
 ```
 
 ## Tests
 
 The certificate tests need the normal build dependencies. The full end-to-end
-suite additionally needs passwordless `sudo`, ACL utilities such as `getfacl`,
-SELinux policy tools, and a usable local SELinux policy store:
+suite additionally needs passwordless `sudo` and ACL utilities such as `getfacl`
+(Debian/Ubuntu package `acl`):
 
 ```sh
 make test
 ```
-
-The policy module is self-contained: it declares the Urados types, the static
-SELinux users (`urados_root_u`, `urados_user_u`, `urados_app_u`), and the
-process-transition grants the launcher needs. Install it on a device with
-`./selinux/build.sh --install-policy` as root, after confirming the target
-base policy is an MLS policy and does not already define those names.

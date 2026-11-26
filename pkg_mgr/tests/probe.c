@@ -1,13 +1,14 @@
 /*
  * probe.c - static integration-test app used to check the DAC layout.
- * SELinux execution denials are additionally asserted by policy neverallows;
- * staging-root tests do not emulate kernel SELinux enforcement.
+ * Confinement is checked by the per-UID ACL and no_new_privs layout;
+ * staging-root tests run the same UID/GID drop without a chroot-only sandbox.
  */
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -118,6 +119,7 @@ static int self_check(int argc, char **argv)
     printf("\n");
     if (getcwd(cwd, sizeof(cwd)))
         printf("cwd=%s\n", cwd);
+    printf("no_new_privs=%d\n", prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0));
     printf("args=%d\n", argc - 1);
     for (i = 1; i < argc; i++)
         printf("arg=%s\n", argv[i]);

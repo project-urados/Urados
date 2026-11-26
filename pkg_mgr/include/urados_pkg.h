@@ -4,6 +4,9 @@
  *   urpkg  - package manager: install / start / verify. Runs as root.
  *   urdev  - developer tool: init / check / keygen / pack.
  *
+ * Confinement is UNIX-only: a distinct UID per app, the shared users GID, POSIX
+ * ACLs keyed to that UID, and no_new_privs on the app process. No MAC policy.
+ *
  * Package format: a zip archive containing
  *   manifest.xml             XML manifest (schema in src/manifest.c)
  *   SIGNER_CERTS.pem         required PEM leaf/intermediate X.509 chain
@@ -25,7 +28,7 @@
  *   /data/app_progs/<name>.zip              root:root 0600   trusted package
  *   /data/app/                              root:root 0711   traverse only
  *   /data/app/<name>/                       root:users 0710, parent protected
- *   /data/app/<name>/data/                  root:users 0770 + per-UID ACL, non-executable data
+ *   /data/app/<name>/data/                  root:users 0770 + per-UID ACL, app-private data
  *   /data/app/<name>/system_cache/          root:users 2730 + per-UID ACL, app WX
  *   /data/app/<name>/system_cache/app/      root:users 2770 + per-UID ACL
  *   /data/app/<name>/system_cache/user/     root:users 2770 + per-UID ACL
@@ -42,7 +45,7 @@
 #include <stddef.h>
 #include <sys/types.h>
 
-#define PKG_NAME_MAX    32    /* Linux user name limit */
+#define PKG_NAME_MAX    32    /* app name: user name and ext4 folder/file name */
 #define PKG_VERSION_MAX 63
 #define PKG_LABEL_MAX   127
 #define PKG_DESC_MAX    511
@@ -76,22 +79,9 @@
 #define PKG_APP_GROUP      "users"            /* primary group of app users */
 #define PKG_CACHE_DIR      "system_cache"
 #define PKG_CACHE_USER_DIR "user"
-#define PKG_RUNNER_PATH    "/urados/bin/urapp-runner"
 #define PKG_USER_UTILS     "/urados/bin/user"
 #define PKG_ZIP_APP_PREFIX "app/"             /* payload prefix inside the zip */
 #define PKG_ENTRY_PREFIX   "system_cache/app/"/* manifest <entry> prefix */
-
-/* SELinux: each app account <name> gets SELinux user "<name>_u", and the Linux
- * login <name> is mapped to it. */
-#define PKG_SEL_SUFFIX   "_u"
-#define PKG_SEL_USER_MAX (PKG_NAME_MAX + 3)   /* "<name>_u" plus NUL */
-#define PKG_SEL_PREFIX   "user"
-#define PKG_SEL_ROLE     "urados_app_r"
-#define PKG_SEL_RANGE    "s0"
-/* SELinux users declared by the Urados policy module (selinux/urados.te).
- * An app may never map onto one of them: that would give it admin rights. */
-#define PKG_SEL_RESERVED_USERS { "urados_root_u", "urados_user_u", "urados_app_u" }
-#define PKG_SEL_RESERVED_COUNT 3
 
 typedef struct {
     char name[PKG_NAME_MAX + 1];
@@ -129,19 +119,6 @@ typedef struct {
     const char *root;      /* "" for the device, or an absolute staging prefix */
     const char *keys_dir;  /* PEM-encoded trusted X.509 CA certificates */
 } pkg_opts;
-
-/* Current SELinux state of an app (pkg_sel_query). */
-typedef struct {
-    int  user_exists;                    /* "<name>_u" is defined in the policy */
-    int  login_exists;                   /* a login mapping for <name> is defined */
-    char login_sename[PKG_SEL_USER_MAX]; /* the SELinux user the mapping points at */
-} pkg_sel_status;
-
-/* What pkg_sel_register added, so that pkg_sel_unregister can undo it. */
-typedef struct {
-    int user_added;
-    int login_added;
-} pkg_sel_state;
 
 /* common.c */
 void pkg_seterr(char *err, size_t errlen, const char *fmt, ...)
@@ -199,16 +176,6 @@ int  pkg_open_subdir(int dirfd, const char *name, mode_t mode, uid_t uid, gid_t 
 int  pkg_lookup_passwd(const char *root, const char *name, uid_t *uid, gid_t *gid);
 int  pkg_lookup_group(const char *root, const char *name, gid_t *gid);
 int  pkg_set_app_uid_acl(int fd, uid_t app_uid, int app_read);
-
-/* selinux.c (libsemanage: SELinux user and login mapping for each app) */
-int  pkg_sel_policy(const char *root, char *out, size_t outlen);
-int  pkg_sel_name(const char *app, char *out, size_t outlen);
-int  pkg_sel_query(const pkg_opts *o, const char *app, pkg_sel_status *st,
-                   char *err, size_t errlen);
-int  pkg_sel_register(const pkg_opts *o, const char *app, pkg_sel_state *st,
-                      char *err, size_t errlen);
-int  pkg_sel_unregister(const pkg_opts *o, const char *app, const pkg_sel_state *st,
-                        char *err, size_t errlen);
 
 /* fetch.c */
 int  pkg_fetch(const char *src, int fd, size_t max, char *err, size_t errlen);

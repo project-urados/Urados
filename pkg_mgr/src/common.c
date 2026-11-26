@@ -29,7 +29,12 @@ static int is_lower(char c) { return c >= 'a' && c <= 'z'; }
 static int is_upper(char c) { return c >= 'A' && c <= 'Z'; }
 static int is_digit(char c) { return c >= '0' && c <= '9'; }
 
-/* Linux user name rules: [a-z_][a-z0-9_-]*, length limited. */
+/*
+ * App names are user names and also the ext4 folder and file names
+ * (/data/app/<name>, /data/app_progs/<name>.zip, locks), so only
+ * [a-z_][a-z0-9_-]* up to PKG_NAME_MAX bytes is accepted: no '/', '.', upper
+ * case, spaces or control characters.
+ */
 int pkg_name_valid(const char *name)
 {
     size_t i, n;

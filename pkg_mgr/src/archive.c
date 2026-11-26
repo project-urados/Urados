@@ -470,8 +470,7 @@ int pkg_extract(const char *zip_path, int appfd, gid_t gid, const pkg_verified *
             }
             tok = next;
         }
-        /* Code is mutable and executable by this app only; SELinux separately
-         * forbids execution from the ordinary data tree. */
+        /* Code is mutable and executable by this app only, through its UID ACL. */
         fmode = 0770;
 
         ffd = openat(cur, tok, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
