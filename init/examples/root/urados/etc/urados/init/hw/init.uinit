@@ -1,0 +1,23 @@
+# Entry unit. uinit runs this file at boot.
+
+log booting ${NAME} ${VERSION} (${CHANNEL})
+
+# Virtual file systems first. They need no device.
+mount NONE /proc type=proc opts=nosuid,nodev,noexec
+mount NONE /sys type=sysfs opts=nosuid,nodev,noexec
+mount NONE /dev type=devtmpfs opts=nosuid,noexec
+mount NONE /run type=tmpfs opts=nosuid,nodev,mode=755
+
+# Data partition by label, partition 3 of the first disk by number, and the
+# system partition by UUID. The data mount is optional: a missing device is
+# logged and the boot continues.
+optional mount LABEL=urados-data /data opts=nosuid,nodev timeout=15
+mount PARTNUM=sda:3 /mnt/backup type=ext4 opts=ro,noexec timeout=10
+mount UUID=6f1d2a3c-4b5e-4f70-8a9b-0c1d2e3f4a5b /system opts=ro timeout=20
+
+# Other units. A relative path is taken from this file's directory.
+run units/services.uinit
+
+# Commands. exec waits for the command, spawn does not.
+exec /bin/sh -c "echo boot-step-done"
+optional spawn user=nobody group=nogroup -- /bin/sleep 3600

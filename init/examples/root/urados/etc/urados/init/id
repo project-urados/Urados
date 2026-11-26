@@ -1,0 +1,4 @@
+# Identity of this OS build. ${NAME}, ${VERSION} and ${CHANNEL} are available in units.
+NAME="Urados"
+VERSION=1.0.0
+CHANNEL=stable

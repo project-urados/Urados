@@ -4,3 +4,4 @@ pkg_mgr/build/
 
 # Local device and test logs
 *.log
+init/build/

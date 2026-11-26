@@ -1,0 +1,5 @@
+# Example service unit, run from init.uinit.
+log starting services
+
+# Runs as the nobody account, with its own PID and no root privileges.
+exec user=nobody group=nogroup groups=nogroup -- /bin/true
