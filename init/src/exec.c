@@ -26,7 +26,7 @@
 
 #include "uinit.h"
 
-#define CHILD_PATH "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+#define CHILD_PATH "/urados/sbin:/urados/bin:/sbin:/bin"
 
 extern char **environ;
 
