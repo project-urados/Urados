@@ -282,6 +282,19 @@ expect_eq "chown sets the owner and group" "nobody nogroup" "$(stat -c '%U %G' "
 expect_eq "chmod -R sets the mode below a directory" 750 "$(stat -c %a "$R/data/sub/g")"
 expect_eq "chown -R sets the group below a directory" nogroup "$(stat -c %G "$R/data/sub/g")"
 
+stage attrx
+mkdir -p "$R/data/tree"
+touch "$R/data/plain" "$R/data/script"
+chmod 0644 "$R/data/plain" "$R/data/tree"
+chmod 0744 "$R/data/script"
+put init.uinit <<'EOF'
+chmod -R +X /data
+EOF
+expect_rc "chmod +X runs recursively" 0 sudo -n "$U" --root "$R"
+expect_eq "chmod +X adds execute bits to directories" 755 "$(stat -c %a "$R/data/tree")"
+expect_eq "chmod +X adds missing execute bits to executable files" 755 "$(stat -c %a "$R/data/script")"
+expect_eq "chmod +X leaves non-executable files unchanged" 644 "$(stat -c %a "$R/data/plain")"
+
 stage attrlink
 mkdir -p "$R/data"
 printf 'x\n' > "$T/attr-outside"

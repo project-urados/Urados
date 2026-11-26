@@ -20,7 +20,9 @@
  *       The same as import with exactly one path. Kept for existing units.
  *
  *   chmod [-R] <mode> <path>
- *       Set permission bits. mode is 1 to 4 octal digits, e.g. 0755 or 4750.
+ *       Set permission bits. mode is 1 to 4 octal digits, e.g. 0755 or 4750,
+ *       or +X to add execute/search bits to directories and already-executable
+ *       files, like chmod +X.
  *       path is an absolute path below / (/ itself is allowed). -R also changes
  *       everything below a directory. The last component of path is never
  *       followed: chmod on a symbolic link is an error, and -R leaves links
@@ -628,11 +630,16 @@ static int parse_exec_mode(const char *s, enum uinit_exec_mode *out)
     return -1;
 }
 
-/* Parses a chmod mode: 1 to 4 octal digits, so the largest is 07777. */
-static int parse_mode(const char *s, mode_t *out)
+/* Parses a chmod mode: 1 to 4 octal digits, or the conditional +X mode. */
+static int parse_mode(const char *s, mode_t *out, int *conditional_exec)
 {
     size_t n = strlen(s), k;
 
+    if (!strcmp(s, "+X")) {
+        *conditional_exec = 1;
+        *out = 0;
+        return 0;
+    }
     if (n < 1 || n > 4)
         return -1;
     for (k = 0; k < n; k++) {
@@ -738,8 +745,8 @@ static int parse_attr(struct uinit_unit *unit, const struct words *w, size_t i, 
             attr_free(&a);
             return -1;
         }
-    } else if (parse_mode(spec, &a.mode) < 0) {
-        uinit_seterr(err, errlen, "mode '%s' must be 1 to 4 octal digits, e.g. 0755", spec);
+    } else if (parse_mode(spec, &a.mode, &a.conditional_exec) < 0) {
+        uinit_seterr(err, errlen, "mode '%s' must be 1 to 4 octal digits, e.g. 0755, or +X", spec);
         attr_free(&a);
         return -1;
     }

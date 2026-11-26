@@ -105,6 +105,18 @@ run units/services.uinit
 
 Nested units are bounded to prevent recursive configuration from exhausting the process.
 
+### Permissions and ownership
+
+Set exact permission bits with octal modes, or use `+X` for the standard conditional execute mode:
+
+```text
+chmod 0755 /urados/bin/user/tool
+chmod -R +X /data
+chown root:root /data
+```
+
+`chmod +X` adds all three execute/search bits to directories and to files that already have at least one execute bit. It leaves ordinary non-executable files unchanged. The `-R` form applies the same rule throughout a directory tree and does not follow symbolic links. Uinit currently accepts octal modes and the exact `+X` form; other symbolic modes such as `u+x` are rejected.
+
 ## Command-line options
 
 ```text

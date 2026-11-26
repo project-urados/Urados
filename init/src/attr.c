@@ -91,6 +91,7 @@ int uinit_lookup_gid(const char *s, gid_t *out, char *err, size_t errlen)
 struct change {
     int is_chown;
     mode_t mode;
+    int conditional_exec;
     int have_uid;
     uid_t uid;
     int have_gid;
@@ -113,7 +114,16 @@ static int change_one(const struct change *c, const char *path, const struct sta
     /* A link has no mode of its own, and chmod would follow it. Leave it alone. */
     if (S_ISLNK(st->st_mode))
         return 0;
-    if (chmod(path, c->mode) < 0) {
+    if (c->conditional_exec) {
+        mode_t mode = st->st_mode & 07777;
+
+        if (S_ISDIR(st->st_mode) || (mode & (S_IXUSR | S_IXGRP | S_IXOTH)))
+            mode |= S_IXUSR | S_IXGRP | S_IXOTH;
+        if (chmod(path, mode) < 0) {
+            uinit_seterr(err, errlen, "chmod %s: %s", path + c->rootlen, strerror(errno));
+            return -1;
+        }
+    } else if (chmod(path, c->mode) < 0) {
         uinit_seterr(err, errlen, "chmod %s: %s", path + c->rootlen, strerror(errno));
         return -1;
     }
@@ -200,6 +210,7 @@ int uinit_do_chmod(const struct uinit_ctx *ctx, const struct uinit_attr *a,
 
     memset(&c, 0, sizeof c);
     c.mode = a->mode;
+    c.conditional_exec = a->conditional_exec;
     return run_change(ctx, a, &c, err, errlen);
 }
 

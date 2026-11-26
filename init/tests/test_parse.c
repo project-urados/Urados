@@ -328,14 +328,16 @@ static void test_chmod_chown(void)
 {
     struct uinit_unit u;
 
-    if (!parse_ok("chmod", "chmod 0755 /data/bin\nchmod -R 750 /data\nchmod 4750 /x\n", &u)) {
-        CHECK(u.nstmts == 3, "chmod: want 3 statements, got %zu", u.nstmts);
+    if (!parse_ok("chmod", "chmod 0755 /data/bin\nchmod -R 750 /data\nchmod 4750 /x\nchmod +X /opt\n", &u)) {
+        CHECK(u.nstmts == 4, "chmod: want 4 statements, got %zu", u.nstmts);
         CHECK(u.stmts[0].op == UINIT_OP_CHMOD, "chmod: op");
         CHECK(u.stmts[0].u.attr.mode == 0755 && !u.stmts[0].u.attr.recursive, "chmod: 0755");
         CHECK(!strcmp(u.stmts[0].u.attr.path, "/data/bin"), "chmod: path '%s'",
               u.stmts[0].u.attr.path);
         CHECK(u.stmts[1].u.attr.mode == 0750 && u.stmts[1].u.attr.recursive, "chmod -R: mode/recursive");
         CHECK(u.stmts[2].u.attr.mode == 04750, "chmod: setuid bit %o", u.stmts[2].u.attr.mode);
+        CHECK(u.stmts[3].u.attr.conditional_exec && u.stmts[3].u.attr.mode == 0,
+              "chmod: +X conditional execute mode");
         uinit_unit_free(&u);
     }
     if (!parse_ok("chmod root", "chmod 0700 /\n", &u)) {
@@ -374,7 +376,7 @@ static void test_chmod_chown(void)
     }
     expect_err("chmod bad digit", "chmod 0758 /x\n", "must be 1 to 4 octal digits");
     expect_err("chmod too long", "chmod 00755 /x\n", "must be 1 to 4 octal digits");
-    expect_err("chmod symbolic", "chmod u+x /x\n", "must be 1 to 4 octal digits");
+    expect_err("chmod symbolic", "chmod u+x /x\n", "must be 1 to 4 octal digits, e.g. 0755, or +X");
     expect_err("chmod relative", "chmod 0755 x\n", "absolute path");
     expect_err("chmod dotdot", "chmod 0755 /a/../b\n", "absolute path");
     expect_err("chmod missing path", "chmod 0755\n", "chmod takes");

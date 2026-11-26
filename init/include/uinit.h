@@ -118,6 +118,7 @@ struct uinit_attr {
     char *path;                      /* target as written in the unit; the root is added at run time */
     int recursive;                   /* -R */
     mode_t mode;                     /* chmod: permission bits */
+    int conditional_exec;             /* chmod: +X, add execute/search bits conditionally */
     char *owner;                     /* chown: user name or uid; NULL keeps the owner */
     char *group;                     /* chown: group name or gid; NULL keeps the group */
     int login_group;                 /* chown "owner:": set the group to the owner's login group */

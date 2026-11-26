@@ -396,8 +396,12 @@ static int exec_replace(struct plan *p, const struct uinit_exec *e, char *err, s
             return changed ? -2 : -1;
         }
     }
-    if (chdir(p->dir) != 0)
-        (void)chdir("/");
+    if (chdir(p->dir) != 0) {
+        /* Best effort: the command may still use an absolute executable path. */
+        if (chdir("/") != 0) {
+            /* Keep going; execve below reports the actual command failure. */
+        }
+    }
     mark_cloexec_all();
 
     /* envp is passed directly, so environ is not touched. */
