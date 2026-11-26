@@ -1,15 +1,27 @@
 /*
- * exec.c - runs commands as a given user and group, in their own process.
+ * exec.c - runs commands as a given user and group, in one of five modes.
  *
- * Each command is started with fork(). The child sets its supplementary groups,
- * gid and uid, and then calls execvp(). Changing to a non-root uid is permanent,
- * so the command cannot get root back. The child starts with an empty signal
- * mask, default signal dispositions, and a clean environment.
+ * A command gets the identity named by its user= and group= options (see
+ * make_plan). A change to a non-root uid is permanent, so the command cannot
+ * get root back. A command starts with an empty signal mask, default signal
+ * dispositions, a clean environment, and no descriptors above stderr.
  *
- * exec waits for the command and reports a non-zero exit status as an error.
- * spawn returns once exec has succeeded. A spawned command is reaped by
- * uinit_supervise() when uinit is PID 1, and otherwise by whichever process
- * it is re-parented to.
+ * Modes (see enum uinit_exec_mode in uinit.h):
+ *   wait, spawn, exit-nonzero, exit
+ *       fork(). The child sets its identity and calls execvp(). If that fails,
+ *       the errno comes back through a close-on-exec pipe.
+ *   replace
+ *       No fork. uinit sets its identity and calls execve() itself, so the
+ *       command keeps uinit's PID. This function returns only on failure.
+ *
+ * Return values of uinit_exec_run():
+ *   0   the command ran. st says how it ended. spawn returns 0 before it ends.
+ *   -1  the command could not be started. uinit's identity is unchanged.
+ *   -2  replace changed uinit's identity and then could not run the command.
+ *       uinit cannot get back to root, so the caller must stop booting.
+ *
+ * spawned commands are reaped by uinit_supervise() when uinit is PID 1, and
+ * otherwise by whichever process they are re-parented to.
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -19,6 +31,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -30,7 +43,7 @@
 
 extern char **environ;
 
-/* Everything the child needs, prepared in the parent before fork(). */
+/* Everything a command needs, prepared in the parent before fork() or exec(). */
 struct plan {
     int apply;                       /* 0: keep the current identity */
     int have_uid;
@@ -39,7 +52,7 @@ struct plan {
     gid_t gid;
     gid_t *groups;
     size_t ngroups;
-    char *dir;                       /* working directory of the child */
+    char *dir;                       /* working directory of the command */
     char *envp[6];                   /* NULL-terminated, strings owned */
 };
 
@@ -52,23 +65,6 @@ static void plan_free(struct plan *p)
     for (i = 0; p->envp[i]; i++)
         free(p->envp[i]);
     memset(p, 0, sizeof *p);
-}
-
-static int lookup_group(const char *s, gid_t *out, char *err, size_t errlen)
-{
-    struct group *gr;
-
-    if (*s && strspn(s, "0123456789") == strlen(s)) {
-        *out = (gid_t)strtoul(s, NULL, 10);
-        return 0;
-    }
-    gr = getgrnam(s);
-    if (!gr) {
-        uinit_seterr(err, errlen, "no such group '%s'", s);
-        return -1;
-    }
-    *out = gr->gr_gid;
-    return 0;
 }
 
 /* Supplementary groups of a user, as initgroups() would set them. */
@@ -112,7 +108,7 @@ static char *dup_env(const char *key, const char *val)
     return s;
 }
 
-/* Works out ids, groups, directory and environment for one exec or spawn. */
+/* Works out ids, groups, directory and environment for one exec. */
 static int make_plan(const struct uinit_exec *e, struct plan *p, char *err, size_t errlen)
 {
     const struct passwd *pw = NULL;
@@ -137,7 +133,7 @@ static int make_plan(const struct uinit_exec *e, struct plan *p, char *err, size
     }
 
     if (e->group) {
-        if (lookup_group(e->group, &p->gid, err, errlen) < 0)
+        if (uinit_lookup_gid(e->group, &p->gid, err, errlen) < 0)
             return -1;
         p->have_gid = 1;
     } else if (pw) {
@@ -155,7 +151,7 @@ static int make_plan(const struct uinit_exec *e, struct plan *p, char *err, size
             return -1;
         }
         for (k = 0; k < e->ngroups; k++) {
-            if (lookup_group(e->groups[k], &p->groups[k], err, errlen) < 0) {
+            if (uinit_lookup_gid(e->groups[k], &p->groups[k], err, errlen) < 0) {
                 p->ngroups = k;
                 plan_free(p);
                 return -1;
@@ -221,6 +217,55 @@ fallback:
     }
 }
 
+/*
+ * Marks every descriptor above stderr close-on-exec. Used by replace, where a
+ * failed exec must leave uinit's descriptors open and usable, while a successful
+ * exec must not pass them on.
+ */
+static void mark_cloexec_all(void)
+{
+    int fd;
+
+    for (fd = 3; fd < 1024; fd++) {
+        int flags = fcntl(fd, F_GETFD);
+
+        if (flags >= 0 && !(flags & FD_CLOEXEC))
+            fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+    }
+}
+
+/* Empty signal mask and default dispositions, as a new program expects. */
+static void reset_signals(void)
+{
+    sigset_t set;
+    int sig;
+
+    sigemptyset(&set);
+    sigprocmask(SIG_SETMASK, &set, NULL);
+    for (sig = 1; sig < NSIG; sig++) {
+        if (sig != SIGKILL && sig != SIGSTOP)
+            signal(sig, SIG_DFL);
+    }
+}
+
+/*
+ * Changes groups, gid and uid, in that order, while still root. Returns 0, or
+ * -1 with errno set. *changed is set once any id has been changed, so the
+ * caller knows whether the process is still in its old identity.
+ */
+static int apply_identity(const struct plan *p, int *changed)
+{
+    *changed = 0;
+    if (setgroups(p->ngroups, p->groups) != 0)
+        return -1;
+    *changed = 1;
+    if (p->have_gid && setgid(p->gid) != 0)
+        return -1;
+    if (p->have_uid && setuid(p->uid) != 0)
+        return -1;
+    return 0;
+}
+
 static void child_fail(int fd, int err) __attribute__((noreturn));
 static void child_fail(int fd, int err)
 {
@@ -230,27 +275,16 @@ static void child_fail(int fd, int err)
     _exit(127);
 }
 
-/* Runs in the child. Never returns. */
+/* Runs in the forked child. Never returns. */
 static void child_exec(struct plan *p, char *const argv[], int errfd)
 {
-    sigset_t set;
-    int sig;
-
     close_others(errfd);
-    sigemptyset(&set);
-    sigprocmask(SIG_SETMASK, &set, NULL);
-    for (sig = 1; sig < NSIG; sig++) {
-        if (sig != SIGKILL && sig != SIGSTOP)
-            signal(sig, SIG_DFL);
-    }
+    reset_signals();
 
     if (p->apply) {
-        /* Order matters: groups and gid must be changed while still root. */
-        if (setgroups(p->ngroups, p->groups) != 0)
-            child_fail(errfd, errno);
-        if (p->have_gid && setgid(p->gid) != 0)
-            child_fail(errfd, errno);
-        if (p->have_uid && setuid(p->uid) != 0)
+        int changed;
+
+        if (apply_identity(p, &changed) != 0)
             child_fail(errfd, errno);
     }
 
@@ -260,6 +294,124 @@ static void child_exec(struct plan *p, char *const argv[], int errfd)
     environ = p->envp;
     execvp(argv[0], argv);
     child_fail(errfd, errno);
+}
+
+/* 0 if path is a regular file that can be executed, else -1 with errno set. */
+static int check_runnable(const char *path)
+{
+    struct stat st;
+
+    if (stat(path, &st) < 0)
+        return -1;
+    if (S_ISDIR(st.st_mode)) {
+        errno = EISDIR;
+        return -1;
+    }
+    if (!S_ISREG(st.st_mode)) {
+        errno = EACCES;
+        return -1;
+    }
+    return access(path, X_OK);
+}
+
+/*
+ * Finds the file replace will execute, before any identity change, so a
+ * missing command is reported while uinit can still go on. Returns a new
+ * string, or NULL with err set.
+ */
+static char *resolve_command(const char *cmd, char *err, size_t errlen)
+{
+    const char *p = CHILD_PATH;
+    size_t cl = strlen(cmd);
+
+    if (strchr(cmd, '/')) {
+        char *out;
+
+        if (check_runnable(cmd) < 0) {
+            uinit_seterr(err, errlen, "cannot run %s: %s", cmd, strerror(errno));
+            return NULL;
+        }
+        out = strdup(cmd);
+        if (!out)
+            uinit_seterr(err, errlen, "out of memory");
+        return out;
+    }
+
+    for (;;) {
+        const char *c = strchr(p, ':');
+        size_t dl = c ? (size_t)(c - p) : strlen(p);
+        char *out = malloc(dl + cl + 2);
+
+        if (!out) {
+            uinit_seterr(err, errlen, "out of memory");
+            return NULL;
+        }
+        memcpy(out, p, dl);
+        out[dl] = '/';
+        memcpy(out + dl + 1, cmd, cl + 1);
+        if (check_runnable(out) == 0)
+            return out;
+        free(out);
+        if (!c)
+            break;
+        p = c + 1;
+    }
+    uinit_seterr(err, errlen, "cannot run %s: %s", cmd, strerror(ENOENT));
+    return NULL;
+}
+
+/*
+ * replace: uinit becomes the command. Returns only on failure.
+ *
+ * A failure before the identity change returns -1 and uinit carries on. Once
+ * the identity has been changed, uinit cannot get root back, so any failure
+ * after that point returns -2 and the caller must stop.
+ */
+static int exec_replace(struct plan *p, const struct uinit_exec *e, char *err, size_t errlen)
+{
+    char *path = resolve_command(e->argv[0], err, errlen);
+    int apply = p->apply;
+    int cerr;
+
+    if (!path) {
+        plan_free(p);
+        return -1;
+    }
+
+    fflush(NULL);
+    reset_signals();
+    if (apply) {
+        int changed;
+
+        if (apply_identity(p, &changed) != 0) {
+            cerr = errno;
+            if (changed)
+                uinit_seterr(err, errlen, "uinit changed its identity and cannot run %s: %s",
+                             e->argv[0], strerror(cerr));
+            else
+                uinit_seterr(err, errlen, "cannot change identity to run %s: %s",
+                             e->argv[0], strerror(cerr));
+            free(path);
+            plan_free(p);
+            return changed ? -2 : -1;
+        }
+    }
+    if (chdir(p->dir) != 0)
+        (void)chdir("/");
+    mark_cloexec_all();
+
+    /* envp is passed directly, so environ is not touched. */
+    execve(path, e->argv, p->envp);
+    cerr = errno;
+
+    if (apply)
+        uinit_seterr(err, errlen, "uinit changed its identity and cannot run %s: %s",
+                     e->argv[0], strerror(cerr));
+    else
+        uinit_seterr(err, errlen, "cannot run %s: %s", e->argv[0], strerror(cerr));
+    free(path);
+    plan_free(p);
+    return apply ? -2 : -1;
 }
 
 static int wait_pid(pid_t pid, int *status)
@@ -272,7 +424,7 @@ static int wait_pid(pid_t pid, int *status)
     return r < 0 ? -1 : 0;
 }
 
-int uinit_exec_run(const struct uinit_exec *e, int wait, char *err, size_t errlen)
+int uinit_exec_run(const struct uinit_exec *e, struct uinit_status *st, char *err, size_t errlen)
 {
     struct plan p;
     int pfd[2];
@@ -280,8 +432,11 @@ int uinit_exec_run(const struct uinit_exec *e, int wait, char *err, size_t errle
     int cerr = 0, status = 0;
     ssize_t n;
 
+    memset(st, 0, sizeof *st);
     if (make_plan(e, &p, err, errlen) < 0)
         return -1;
+    if (e->mode == UINIT_MODE_REPLACE)
+        return exec_replace(&p, e, err, errlen);
 
     /* The write end is close-on-exec, so a successful exec() closes it and read() returns 0. */
     if (pipe2(pfd, O_CLOEXEC) < 0) {
@@ -315,7 +470,7 @@ int uinit_exec_run(const struct uinit_exec *e, int wait, char *err, size_t errle
         return -1;
     }
 
-    if (!wait) {
+    if (e->mode == UINIT_MODE_SPAWN) {
         uinit_debug("spawned %s as pid %d", e->argv[0], (int)pid);
         return 0;
     }
@@ -324,19 +479,23 @@ int uinit_exec_run(const struct uinit_exec *e, int wait, char *err, size_t errle
         return -1;
     }
     if (WIFEXITED(status)) {
-        if (WEXITSTATUS(status) == 0) {
-            uinit_debug("%s finished", e->argv[0]);
-            return 0;
-        }
-        uinit_seterr(err, errlen, "%s exited with status %d", e->argv[0], WEXITSTATUS(status));
-        return -1;
+        st->code = WEXITSTATUS(status);
+        uinit_debug("%s exited with status %d", e->argv[0], st->code);
+        return 0;
     }
     if (WIFSIGNALED(status)) {
-        uinit_seterr(err, errlen, "%s killed by signal %d", e->argv[0], WTERMSIG(status));
-        return -1;
+        st->sig = WTERMSIG(status);
+        uinit_debug("%s killed by signal %d", e->argv[0], st->sig);
+        return 0;
     }
     uinit_seterr(err, errlen, "%s ended in an unknown state", e->argv[0]);
     return -1;
+}
+
+/* A killed command ends with 128 + signal number, the shell convention. */
+int uinit_status_exit_code(const struct uinit_status *st)
+{
+    return st->sig ? 128 + st->sig : st->code;
 }
 
 /* Reaps every child, forever. PID 1 must never exit: that panics the kernel. */

@@ -222,13 +222,44 @@ static void test_exec(void)
     if (!parse_ok("spawn", "spawn -- /bin/true\n", &u)) {
         const struct uinit_exec *e = &u.stmts[0].u.exec;
 
-        CHECK(u.stmts[0].op == UINIT_OP_SPAWN, "spawn: wrong op");
+        CHECK(u.stmts[0].op == UINIT_OP_EXEC, "spawn: wrong op");
+        CHECK(e->mode == UINIT_MODE_SPAWN, "spawn: mode %d", e->mode);
         CHECK(e->user == NULL && e->group == NULL && e->groups == NULL, "spawn: identity set");
         CHECK(e->argc == 1 && !strcmp(e->argv[0], "/bin/true"), "spawn: argv");
         uinit_unit_free(&u);
     }
     if (!parse_ok("no separator", "exec /bin/true\n", &u)) {
         CHECK(u.stmts[0].u.exec.argc == 1, "no separator: argc");
+        CHECK(u.stmts[0].u.exec.mode == UINIT_MODE_WAIT, "default mode is wait");
+        uinit_unit_free(&u);
+    }
+    if (!parse_ok("modes",
+                  "exec mode=wait -- /bin/true\n"
+                  "exec mode=spawn -- /bin/true\n"
+                  "exec mode=replace -- /bin/true\n"
+                  "exec mode=exit-nonzero -- /bin/true\n"
+                  "exec mode=exit -- /bin/true\n", &u)) {
+        CHECK(u.nstmts == 5, "modes: %zu statements", u.nstmts);
+        CHECK(u.stmts[0].u.exec.mode == UINIT_MODE_WAIT, "mode wait");
+        CHECK(u.stmts[1].u.exec.mode == UINIT_MODE_SPAWN, "mode spawn");
+        CHECK(u.stmts[2].u.exec.mode == UINIT_MODE_REPLACE, "mode replace");
+        CHECK(u.stmts[3].u.exec.mode == UINIT_MODE_EXIT_NONZERO, "mode exit-nonzero");
+        CHECK(u.stmts[4].u.exec.mode == UINIT_MODE_EXIT, "mode exit");
+        uinit_unit_free(&u);
+    }
+    if (!parse_ok("mode with identity", "exec mode=replace user=nobody group=nogroup -- /bin/true\n", &u)) {
+        CHECK(u.stmts[0].u.exec.mode == UINIT_MODE_REPLACE && u.stmts[0].u.exec.user,
+              "mode with identity: fields");
+        uinit_unit_free(&u);
+    }
+    expect_err("unknown mode", "exec mode=fork -- /bin/true\n", "unknown mode 'fork'");
+    expect_err("empty mode", "exec mode= -- /bin/true\n", "unknown mode ''");
+    expect_err("mode twice", "exec mode=wait mode=exit -- /bin/true\n", "mode= given twice");
+    expect_err("spawn with mode", "spawn mode=exit -- /bin/true\n", "spawn takes no mode=");
+    if (!parse_ok("mode after command is an argument", "exec /bin/true mode=exit\n", &u)) {
+        CHECK(u.stmts[0].u.exec.mode == UINIT_MODE_WAIT, "mode after command: mode changed");
+        CHECK(u.stmts[0].u.exec.argc == 2 && !strcmp(u.stmts[0].u.exec.argv[1], "mode=exit"),
+              "mode after command: argv");
         uinit_unit_free(&u);
     }
     if (!parse_ok("optional exec", "optional exec user=1000 group=1000 -- /bin/true\n", &u)) {
@@ -262,6 +293,95 @@ static void test_run_paths(void)
     expect_err("run dotdot", "run ../x.uinit\n", "invalid path");
     expect_err("run no path", "run\n", "exactly one path");
     expect_err("run two paths", "run a b\n", "exactly one path");
+}
+
+static void test_import(void)
+{
+    struct uinit_unit u;
+
+    if (!parse_ok("import one", "import units/services.uinit\n", &u)) {
+        CHECK(u.nstmts == 1 && u.stmts[0].op == UINIT_OP_RUN, "import one: op");
+        CHECK(!strcmp(u.stmts[0].u.run_path, "/urados/etc/urados/init/hw/units/services.uinit"),
+              "import one: got '%s'", u.stmts[0].u.run_path);
+        uinit_unit_free(&u);
+    }
+    if (!parse_ok("import many", "import /urados/a.uinit b.uinit \"c d.uinit\"\n", &u)) {
+        CHECK(u.nstmts == 3, "import many: want 3 statements, got %zu", u.nstmts);
+        CHECK(!strcmp(u.stmts[0].u.run_path, "/urados/a.uinit"), "import many: first '%s'",
+              u.stmts[0].u.run_path);
+        CHECK(!strcmp(u.stmts[1].u.run_path, "/urados/etc/urados/init/hw/b.uinit"),
+              "import many: second '%s'", u.stmts[1].u.run_path);
+        CHECK(!strcmp(u.stmts[2].u.run_path, "/urados/etc/urados/init/hw/c d.uinit"),
+              "import many: third '%s'", u.stmts[2].u.run_path);
+        uinit_unit_free(&u);
+    }
+    if (!parse_ok("optional import", "optional import x.uinit\n", &u)) {
+        CHECK(u.stmts[0].optional && u.stmts[0].op == UINIT_OP_RUN, "optional import: flag");
+        uinit_unit_free(&u);
+    }
+    expect_err("import no path", "import\n", "import needs at least one path");
+    expect_err("import dotdot", "import a.uinit ../b.uinit\n", "invalid path '../b.uinit'");
+    expect_err("run still takes one", "run a b\n", "run takes exactly one path");
+}
+
+static void test_chmod_chown(void)
+{
+    struct uinit_unit u;
+
+    if (!parse_ok("chmod", "chmod 0755 /data/bin\nchmod -R 750 /data\nchmod 4750 /x\n", &u)) {
+        CHECK(u.nstmts == 3, "chmod: want 3 statements, got %zu", u.nstmts);
+        CHECK(u.stmts[0].op == UINIT_OP_CHMOD, "chmod: op");
+        CHECK(u.stmts[0].u.attr.mode == 0755 && !u.stmts[0].u.attr.recursive, "chmod: 0755");
+        CHECK(!strcmp(u.stmts[0].u.attr.path, "/data/bin"), "chmod: path '%s'",
+              u.stmts[0].u.attr.path);
+        CHECK(u.stmts[1].u.attr.mode == 0750 && u.stmts[1].u.attr.recursive, "chmod -R: mode/recursive");
+        CHECK(u.stmts[2].u.attr.mode == 04750, "chmod: setuid bit %o", u.stmts[2].u.attr.mode);
+        uinit_unit_free(&u);
+    }
+    if (!parse_ok("chmod root", "chmod 0700 /\n", &u)) {
+        CHECK(!strcmp(u.stmts[0].u.attr.path, "/"), "chmod root: path");
+        uinit_unit_free(&u);
+    }
+    if (!parse_ok("chown owner", "chown alice /data\n", &u)) {
+        const struct uinit_attr *a = &u.stmts[0].u.attr;
+
+        CHECK(u.stmts[0].op == UINIT_OP_CHOWN, "chown: op");
+        CHECK(!strcmp(a->owner, "alice") && !a->group && !a->login_group, "chown owner only");
+        uinit_unit_free(&u);
+    }
+    if (!parse_ok("chown owner:group", "chown -R 1000:100 /data\n", &u)) {
+        const struct uinit_attr *a = &u.stmts[0].u.attr;
+
+        CHECK(a->recursive && !strcmp(a->owner, "1000") && !strcmp(a->group, "100"),
+              "chown owner:group");
+        uinit_unit_free(&u);
+    }
+    if (!parse_ok("chown owner:", "chown alice: /data\n", &u)) {
+        const struct uinit_attr *a = &u.stmts[0].u.attr;
+
+        CHECK(!strcmp(a->owner, "alice") && !a->group && a->login_group, "chown owner:");
+        uinit_unit_free(&u);
+    }
+    if (!parse_ok("chown :group", "chown :staff /data\n", &u)) {
+        const struct uinit_attr *a = &u.stmts[0].u.attr;
+
+        CHECK(!a->owner && !strcmp(a->group, "staff") && !a->login_group, "chown :group");
+        uinit_unit_free(&u);
+    }
+    if (!parse_ok("optional chmod", "optional chmod 0644 /x\n", &u)) {
+        CHECK(u.stmts[0].optional, "optional chmod: flag");
+        uinit_unit_free(&u);
+    }
+    expect_err("chmod bad digit", "chmod 0758 /x\n", "must be 1 to 4 octal digits");
+    expect_err("chmod too long", "chmod 00755 /x\n", "must be 1 to 4 octal digits");
+    expect_err("chmod symbolic", "chmod u+x /x\n", "must be 1 to 4 octal digits");
+    expect_err("chmod relative", "chmod 0755 x\n", "absolute path");
+    expect_err("chmod dotdot", "chmod 0755 /a/../b\n", "absolute path");
+    expect_err("chmod missing path", "chmod 0755\n", "chmod takes");
+    expect_err("chown no owner", "chown : /x\n", "needs an owner or a group");
+    expect_err("chown two colons", "chown a:b:c /x\n", "at most one ':'");
+    expect_err("chown relative", "chown alice x\n", "absolute path");
+    expect_err("chown missing path", "chown alice\n", "chown takes");
 }
 
 static void test_mount_opt_table(void)
@@ -340,6 +460,8 @@ int main(void)
     test_mount_errors();
     test_exec();
     test_run_paths();
+    test_import();
+    test_chmod_chown();
     test_mount_opt_table();
     test_ident();
 

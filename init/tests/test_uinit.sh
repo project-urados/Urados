@@ -228,6 +228,208 @@ EOF
 expect_rc "an optional missing UUID does not stop the boot" 0 sudo -n "$U" --root "$R"
 expect_log "boot continues after an optional missing device" "boot continues"
 
+echo "== import"
+stage imports
+put init.uinit <<'EOF'
+import units/a.uinit units/b.uinit
+log main continues
+EOF
+put units/a.uinit <<'EOF'
+log first
+EOF
+put units/b.uinit <<'EOF'
+log second
+EOF
+expect_rc "import runs several units" 0 "$U" --root "$R"
+expect_eq "imports run in the order given" first "$(grep -o 'first\|second' "$T/last.log" | head -n 1)"
+expect_log "importing unit continues after imports" "main continues"
+
+stage importfail
+put init.uinit <<'EOF'
+import units/bad.uinit
+log NEVER
+EOF
+put units/bad.uinit <<'EOF'
+exec -- /bin/false
+EOF
+expect_rc "a failed import stops the importing unit" 1 "$U" --root "$R"
+expect_no_log "statements after a failed import do not run" "NEVER"
+
+stage importopt
+put init.uinit <<'EOF'
+optional import units/bad.uinit
+log continues
+EOF
+put units/bad.uinit <<'EOF'
+exec -- /bin/false
+EOF
+expect_rc "optional import failure does not stop the unit" 0 "$U" --root "$R"
+expect_log "unit continues after an optional import failure" "continues"
+
+echo "== chmod and chown"
+stage attrs
+mkdir -p "$R/data/sub"
+touch "$R/data/f" "$R/data/sub/g"
+put init.uinit <<'EOF'
+chmod 0700 /data/f
+chmod -R 0750 /data/sub
+chown nobody:nogroup /data/f
+chown -R :nogroup /data/sub
+EOF
+expect_rc "chmod and chown run as root" 0 sudo -n "$U" --root "$R"
+expect_eq "chmod sets the mode" 700 "$(stat -c %a "$R/data/f")"
+expect_eq "chown sets the owner and group" "nobody nogroup" "$(stat -c '%U %G' "$R/data/f")"
+expect_eq "chmod -R sets the mode below a directory" 750 "$(stat -c %a "$R/data/sub/g")"
+expect_eq "chown -R sets the group below a directory" nogroup "$(stat -c %G "$R/data/sub/g")"
+
+stage attrlink
+mkdir -p "$R/data"
+printf 'x\n' > "$T/attr-outside"
+chmod 0644 "$T/attr-outside"
+ln -s "$T/attr-outside" "$R/data/link"
+put init.uinit <<'EOF'
+chmod -R 0600 /data
+EOF
+expect_rc "chmod -R does not follow symbolic links" 0 sudo -n "$U" --root "$R"
+expect_eq "the link's target keeps its mode" 644 "$(stat -c %a "$T/attr-outside")"
+
+stage attrlinkroot
+mkdir -p "$R/data"
+ln -s "$T/attr-outside" "$R/data/link"
+put init.uinit <<'EOF'
+chmod 0600 /data/link
+EOF
+expect_rc "chmod on a symbolic link fails" 1 sudo -n "$U" --root "$R"
+expect_log "the failure says it is a symbolic link" "symbolic link"
+expect_eq "chmod on a link leaves its target alone" 644 "$(stat -c %a "$T/attr-outside")"
+
+stage attrbad
+mkdir -p "$R/data"
+touch "$R/data/f"
+put init.uinit <<'EOF'
+chown no-such-user-uinit /data/f
+EOF
+expect_rc "chown to an unknown user fails" 1 sudo -n "$U" --root "$R"
+expect_log "the error names the user" "no such user 'no-such-user-uinit'"
+
+echo "== exec modes"
+stage modeexit0
+put init.uinit <<'EOF'
+exec mode=exit -- /bin/sh -c "exit 0"
+log NEVER
+EOF
+expect_rc "mode=exit with status 0 ends the boot with 0" 0 "$U" --root "$R"
+expect_no_log "mode=exit stops the boot" "NEVER"
+
+stage modeexit42
+put init.uinit <<'EOF'
+exec mode=exit -- /bin/sh -c "exit 42"
+log NEVER
+EOF
+expect_rc "mode=exit returns the command's status" 42 "$U" --root "$R"
+expect_no_log "mode=exit with status 42 stops the boot" "NEVER"
+
+stage modeexitsig
+put init.uinit <<'EOF'
+exec mode=exit -- /bin/sh -c 'kill -TERM $$'
+EOF
+expect_rc "mode=exit on a signal returns 128 + signal" 143 "$U" --root "$R"
+
+stage modenzok
+put init.uinit <<'EOF'
+exec mode=exit-nonzero -- /bin/sh -c "exit 0"
+log continues
+EOF
+expect_rc "mode=exit-nonzero with status 0 continues the boot" 0 "$U" --root "$R"
+expect_log "boot continues after exit-nonzero with status 0" "continues"
+
+stage modenz5
+put init.uinit <<'EOF'
+exec mode=exit-nonzero -- /bin/sh -c "exit 5"
+log NEVER
+EOF
+expect_rc "mode=exit-nonzero with status 5 ends the boot with 5" 5 "$U" --root "$R"
+expect_no_log "mode=exit-nonzero stops the boot" "NEVER"
+
+stage modenzopt
+put init.uinit <<'EOF'
+optional exec mode=exit-nonzero -- /bin/sh -c "exit 3"
+log NEVER
+EOF
+expect_rc "optional does not stop an exit mode" 3 "$U" --root "$R"
+
+stage modewait
+put init.uinit <<'EOF'
+exec mode=wait -- /bin/sh -c "exit 9"
+log NEVER
+EOF
+expect_rc "mode=wait with status 9 fails the boot" 1 "$U" --root "$R"
+expect_no_log "mode=wait failure stops the unit" "NEVER"
+
+echo "== replace"
+stage replacepid
+put init.uinit <<EOF
+exec mode=replace -- /bin/sh -c 'echo \$\$ > "$T/replace.pid"'
+log NEVER
+EOF
+rm -f "$T/replace.pid" "$T/uinit.pid"
+expect_rc "mode=replace runs the command in uinit's place" 0 \
+    sudo -n sh -c "echo \$\$ > '$T/uinit.pid'; exec '$U' --root '$R'"
+expect_eq "replace keeps uinit's PID" "$(cat "$T/uinit.pid")" "$(cat "$T/replace.pid")"
+expect_no_log "nothing after a replace runs" "NEVER"
+
+stage replaceexit
+put init.uinit <<'EOF'
+exec mode=replace -- /bin/sh -c "exit 7"
+log NEVER
+EOF
+expect_rc "the replaced command's status is the process status" 7 sudo -n "$U" --root "$R"
+
+stage replaceid
+put init.uinit <<'EOF'
+exec mode=replace user=nobody group=nogroup groups=nogroup -- /bin/sleep 4
+log NEVER
+EOF
+rm -f "$T/uinit.pid"
+sudo -n sh -c "echo \$\$ > '$T/uinit.pid'; exec '$U' --root '$R'" >"$T/replaceid.log" 2>&1 &
+BG=$!
+i=0
+while [ $i -lt 50 ] && [ -z "$(pgrep -u 65534 -x sleep)" ]; do
+    sleep 0.1
+    i=$((i + 1))
+done
+UP=$(cat "$T/uinit.pid" 2>/dev/null || echo 0)
+SP=$(pgrep -u 65534 -x sleep | head -n 1)
+expect_eq "replace changes identity and keeps the PID" "$UP" "${SP:-none}"
+expect_eq "the replaced command runs as nobody" 65534 \
+    "$(awk '/^Uid:/{print $2}' "/proc/${SP:-0}/status" 2>/dev/null || echo none)"
+if wait "$BG"; then
+    ok "replaced command finishes with status 0"
+else
+    bad "replaced command finishes with status 0"
+    sed 's/^/          /' "$T/replaceid.log"
+fi
+
+stage replacemissing
+put init.uinit <<'EOF'
+optional exec mode=replace user=nobody group=nogroup -- /no/such/command
+log continues
+EOF
+expect_rc "a replace that cannot start, before any identity change, is optional" 0 "$U" --root "$R"
+expect_log "unit continues after that optional replace" "continues"
+
+stage replacefatal
+printf 'not a program\n' > "$T/noexec.sh"
+chmod 0755 "$T/noexec.sh"
+put init.uinit <<EOF
+optional exec mode=replace user=nobody group=nogroup -- $T/noexec.sh
+log NEVER
+EOF
+expect_rc "a replace that fails after an identity change stops the boot, even if optional" 1 \
+    sudo -n "$U" --root "$R"
+expect_log "the failure says uinit changed its identity" "changed its identity"
+expect_no_log "nothing after that replace runs" "NEVER"
+
 # Loop disk with two ext4 partitions: partition 1 has UUID and LABEL, partition 2 another label.
 echo "== mounts on a loop disk"
 IMG="$T/disk.img"

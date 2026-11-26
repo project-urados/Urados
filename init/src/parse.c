@@ -10,10 +10,30 @@
  *   optional <statement>
  *       The statement may fail without stopping the unit. The failure is logged.
  *
+ *   import <path> [<path>...]
+ *       Run one or more other units, in order. An absolute path is taken from
+ *       the root. A relative path is taken from the directory of the current
+ *       unit. Paths may not contain "..". Nesting is limited to UINIT_MAX_DEPTH.
+ *       If an imported unit fails, the importing unit stops, unless optional.
+ *
  *   run <path>
- *       Run another unit. An absolute path is taken from the root. A relative
- *       path is taken from the directory of the current unit. Paths may not
- *       contain "..". Nesting is limited to UINIT_MAX_DEPTH.
+ *       The same as import with exactly one path. Kept for existing units.
+ *
+ *   chmod [-R] <mode> <path>
+ *       Set permission bits. mode is 1 to 4 octal digits, e.g. 0755 or 4750.
+ *       path is an absolute path below / (/ itself is allowed). -R also changes
+ *       everything below a directory. The last component of path is never
+ *       followed: chmod on a symbolic link is an error, and -R leaves links
+ *       alone. Links in the directories above path are followed as usual.
+ *
+ *   chown [-R] <owner>[:<group>] <path>
+ *       Set the owner and/or group. Each is a name or a numeric id.
+ *           chown alice /p          set the owner, keep the group
+ *           chown alice:staff /p    set both
+ *           chown alice: /p         set the owner and alice's login group
+ *           chown :staff /p         set the group, keep the owner
+ *       -R and the path rules are the same as for chmod. A link is changed
+ *       itself, never its target. Names are looked up when the statement runs.
  *
  *   log <text...>
  *       Print the words, joined by single blanks, on the console.
@@ -31,12 +51,32 @@
  *       timeout is how long to wait for a device to appear. The default is 5
  *       seconds and the maximum is 300. NONE mounts do not wait.
  *
- *   exec [user=<name|uid>] [group=<name|gid>] [groups=<g1,g2,...>] [--] <cmd> [args...]
- *   spawn [...same options...] [--] <cmd> [args...]
- *       Run a command in a new process. exec waits for the command, and a
- *       non-zero exit is a failure. spawn starts the command and continues at
- *       once. Options must come before the command. Without user= or group=,
- *       the command keeps the uinit identity.
+ *   exec [mode=<mode>] [user=<name|uid>] [group=<name|gid>] [groups=<g1,g2,...>] [--] <cmd> [args...]
+ *   spawn [user=...] [group=...] [groups=...] [--] <cmd> [args...]
+ *       Run a command. Options must come before the command. Without user= or
+ *       group=, the command keeps the uinit identity. spawn is the same as
+ *       exec mode=spawn, and takes no mode=.
+ *
+ *       mode=wait (the default)
+ *           Fork and wait for the command. Exit status 0 continues the unit.
+ *           Any other status, or a signal, fails the statement.
+ *       mode=spawn
+ *           Fork and continue at once. The command is reaped later.
+ *       mode=replace
+ *           No fork. uinit becomes the command: same PID. Nothing after the
+ *           statement runs. If the command cannot start, the statement fails.
+ *           Once user= or group= has changed uinit's identity, a failure stops
+ *           the boot even if the statement is optional, because uinit can no
+ *           longer get back to root.
+ *       mode=exit-nonzero
+ *           Fork and wait. A non-zero status ends uinit with that status. Zero
+ *           continues the boot.
+ *       mode=exit
+ *           Fork and wait. uinit ends with the command's status, including 0.
+ *
+ *       A command killed by a signal counts as status 128 + the signal number.
+ *       exit and exit-nonzero stop the whole boot, including the importing units.
+ *       As PID 1, uinit cannot exit: it logs the request and keeps reaping.
  */
 #include <ctype.h>
 #include <errno.h>
@@ -398,26 +438,23 @@ static int parse_timeout(const char *s, unsigned int *out)
     return 0;
 }
 
-static int parse_run(struct uinit_unit *unit, const struct words *w, size_t i, int line,
-                     int optional, char *err, size_t errlen)
+/*
+ * Resolves one unit path from a run or import statement. An absolute path is
+ * kept. A relative path is taken from the directory of unit, whose path is
+ * absolute. Returns a new string, or NULL with err set.
+ */
+static char *resolve_unit_path(const struct uinit_unit *unit, const char *path,
+                               char *err, size_t errlen)
 {
-    const char *path;
     char *resolved;
-    struct uinit_stmt *st;
 
-    if (w->n != i + 2) {
-        uinit_seterr(err, errlen, "run takes exactly one path");
-        return -1;
-    }
-    path = w->v[i + 1];
     if (!valid_path(path)) {
         uinit_seterr(err, errlen, "invalid path '%s'", path);
-        return -1;
+        return NULL;
     }
     if (path[0] == '/') {
         resolved = strdup(path);
     } else {
-        /* Relative to the directory of this unit: unit->path is absolute. */
         const char *slash = strrchr(unit->path, '/');
         size_t dirlen = slash ? (size_t)(slash - unit->path) : 0;
 
@@ -429,14 +466,41 @@ static int parse_run(struct uinit_unit *unit, const struct words *w, size_t i, i
         }
     }
     if (!resolved)
-        OOM(err, errlen);
+        uinit_seterr(err, errlen, "out of memory");
+    return resolved;
+}
 
-    st = stmt_new(unit, UINIT_OP_RUN, line, optional);
-    if (!st) {
-        free(resolved);
-        OOM(err, errlen);
+/*
+ * run <path> takes exactly one path. import takes one or more. Each path becomes
+ * its own statement, run in order.
+ */
+static int parse_import(struct uinit_unit *unit, const struct words *w, size_t i, int line,
+                        int optional, char *err, size_t errlen)
+{
+    int single = !strcmp(w->v[i], "run");
+    size_t k;
+
+    if (single && w->n != i + 2) {
+        uinit_seterr(err, errlen, "run takes exactly one path");
+        return -1;
     }
-    st->u.run_path = resolved;
+    if (!single && w->n < i + 2) {
+        uinit_seterr(err, errlen, "import needs at least one path");
+        return -1;
+    }
+    for (k = i + 1; k < w->n; k++) {
+        char *resolved = resolve_unit_path(unit, w->v[k], err, errlen);
+        struct uinit_stmt *st;
+
+        if (!resolved)
+            return -1;
+        st = stmt_new(unit, UINIT_OP_RUN, line, optional);
+        if (!st) {
+            free(resolved);
+            OOM(err, errlen);
+        }
+        st->u.run_path = resolved;
+    }
     return 0;
 }
 
@@ -540,6 +604,155 @@ static int parse_mount(struct uinit_unit *unit, const struct words *w, size_t i,
     return 0;
 }
 
+/* Parses one exec mode name. */
+static int parse_exec_mode(const char *s, enum uinit_exec_mode *out)
+{
+    static const struct {
+        const char *name;
+        enum uinit_exec_mode mode;
+    } names[] = {
+        { "wait",         UINIT_MODE_WAIT },
+        { "spawn",        UINIT_MODE_SPAWN },
+        { "replace",      UINIT_MODE_REPLACE },
+        { "exit-nonzero", UINIT_MODE_EXIT_NONZERO },
+        { "exit",         UINIT_MODE_EXIT },
+    };
+    size_t k;
+
+    for (k = 0; k < sizeof names / sizeof names[0]; k++) {
+        if (!strcmp(s, names[k].name)) {
+            *out = names[k].mode;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+/* Parses a chmod mode: 1 to 4 octal digits, so the largest is 07777. */
+static int parse_mode(const char *s, mode_t *out)
+{
+    size_t n = strlen(s), k;
+
+    if (n < 1 || n > 4)
+        return -1;
+    for (k = 0; k < n; k++) {
+        if (s[k] < '0' || s[k] > '7')
+            return -1;
+    }
+    *out = (mode_t)strtoul(s, NULL, 8);
+    return 0;
+}
+
+/* Frees the strings of an attr that has not been moved into a statement yet. */
+static void attr_free(struct uinit_attr *a)
+{
+    free(a->path);
+    free(a->owner);
+    free(a->group);
+    memset(a, 0, sizeof *a);
+}
+
+/*
+ * Parses the chown owner spec into a->owner, a->group and a->login_group.
+ * Forms: "owner", "owner:group", "owner:" and ":group".
+ */
+static int parse_owner_spec(const char *spec, struct uinit_attr *a, char *err, size_t errlen)
+{
+    const char *colon = strchr(spec, ':');
+    const char *group;
+
+    if (!*spec) {
+        uinit_seterr(err, errlen, "chown needs an owner or a group");
+        return -1;
+    }
+    if (!colon) {
+        a->owner = strdup(spec);
+        if (!a->owner)
+            OOM(err, errlen);
+        return 0;
+    }
+    group = colon + 1;
+    if (strchr(group, ':')) {
+        uinit_seterr(err, errlen, "chown takes at most one ':' in '%s'", spec);
+        return -1;
+    }
+    if (colon == spec) {
+        if (!*group) {
+            uinit_seterr(err, errlen, "chown needs an owner or a group in ':'");
+            return -1;
+        }
+        a->group = strdup(group);
+        if (!a->group)
+            OOM(err, errlen);
+        return 0;
+    }
+    a->owner = strndup(spec, (size_t)(colon - spec));
+    if (!a->owner)
+        OOM(err, errlen);
+    if (*group) {
+        a->group = strdup(group);
+        if (!a->group)
+            OOM(err, errlen);
+    } else {
+        a->login_group = 1;
+    }
+    return 0;
+}
+
+/*
+ * chmod [-R] <mode> <path> and chown [-R] <owner>[:<group>] <path>. The path
+ * is absolute and below /. Names are looked up when the statement runs.
+ */
+static int parse_attr(struct uinit_unit *unit, const struct words *w, size_t i, int line,
+                      int optional, char *err, size_t errlen)
+{
+    int is_chown = !strcmp(w->v[i], "chown");
+    struct uinit_attr a;
+    struct uinit_stmt *st;
+    const char *spec, *path;
+    size_t k = i + 1;
+
+    memset(&a, 0, sizeof a);
+    if (k < w->n && !strcmp(w->v[k], "-R")) {
+        a.recursive = 1;
+        k++;
+    }
+    if (w->n != k + 2) {
+        uinit_seterr(err, errlen, is_chown ? "chown takes [-R] <owner[:group]> <path>"
+                                           : "chmod takes [-R] <mode> <path>");
+        return -1;
+    }
+    spec = w->v[k];
+    path = w->v[k + 1];
+    if (path[0] != '/' || !valid_path(path)) {
+        uinit_seterr(err, errlen, "%s path '%s' must be an absolute path below /",
+                     w->v[i], path);
+        return -1;
+    }
+    a.path = strdup(path);
+    if (!a.path)
+        OOM(err, errlen);
+
+    if (is_chown) {
+        if (parse_owner_spec(spec, &a, err, errlen) < 0) {
+            attr_free(&a);
+            return -1;
+        }
+    } else if (parse_mode(spec, &a.mode) < 0) {
+        uinit_seterr(err, errlen, "mode '%s' must be 1 to 4 octal digits, e.g. 0755", spec);
+        attr_free(&a);
+        return -1;
+    }
+
+    st = stmt_new(unit, is_chown ? UINIT_OP_CHOWN : UINIT_OP_CHMOD, line, optional);
+    if (!st) {
+        attr_free(&a);
+        OOM(err, errlen);
+    }
+    st->u.attr = a;
+    return 0;
+}
+
 /* Parses "a,b,c" into e->groups. ngroups is kept in step so a partial failure frees cleanly. */
 static int split_groups(struct uinit_exec *e, const char *list, char *err, size_t errlen)
 {
@@ -576,20 +789,38 @@ static int split_groups(struct uinit_exec *e, const char *list, char *err, size_
 static int parse_exec(struct uinit_unit *unit, struct words *w, size_t i, int line,
                       int optional, char *err, size_t errlen)
 {
-    enum uinit_op op = !strcmp(w->v[i], "spawn") ? UINIT_OP_SPAWN : UINIT_OP_EXEC;
+    int is_spawn = !strcmp(w->v[i], "spawn");
+    int seen_mode = 0;
     struct uinit_stmt *st;
     struct uinit_exec *e;
     size_t k = i + 1, argc, j;
 
-    st = stmt_new(unit, op, line, optional);
+    st = stmt_new(unit, UINIT_OP_EXEC, line, optional);
     if (!st)
         OOM(err, errlen);
     e = &st->u.exec;
+    e->mode = is_spawn ? UINIT_MODE_SPAWN : UINIT_MODE_WAIT;
 
     for (; k < w->n; k++) {
         const char *word = w->v[k];
 
-        if (!strncmp(word, "user=", 5)) {
+        if (!strncmp(word, "mode=", 5)) {
+            if (is_spawn) {
+                uinit_seterr(err, errlen, "spawn takes no mode=; use exec mode=%s", word + 5);
+                return -1;
+            }
+            if (seen_mode) {
+                uinit_seterr(err, errlen, "mode= given twice");
+                return -1;
+            }
+            if (parse_exec_mode(word + 5, &e->mode) < 0) {
+                uinit_seterr(err, errlen,
+                             "unknown mode '%s'; use wait, spawn, replace, exit-nonzero or exit",
+                             word + 5);
+                return -1;
+            }
+            seen_mode = 1;
+        } else if (!strncmp(word, "user=", 5)) {
             if (e->user) {
                 uinit_seterr(err, errlen, "user= given twice");
                 return -1;
@@ -684,14 +915,16 @@ static int parse_line(const struct uinit_ctx *ctx, struct uinit_unit *unit, int 
         }
     }
 
-    if (!strcmp(w.v[i], "run"))
-        rc = parse_run(unit, &w, i, lineno, optional, err, errlen);
+    if (!strcmp(w.v[i], "run") || !strcmp(w.v[i], "import"))
+        rc = parse_import(unit, &w, i, lineno, optional, err, errlen);
     else if (!strcmp(w.v[i], "log"))
         rc = parse_log(unit, &w, i, lineno, optional, err, errlen);
     else if (!strcmp(w.v[i], "mount"))
         rc = parse_mount(unit, &w, i, lineno, optional, err, errlen);
     else if (!strcmp(w.v[i], "exec") || !strcmp(w.v[i], "spawn"))
         rc = parse_exec(unit, &w, i, lineno, optional, err, errlen);
+    else if (!strcmp(w.v[i], "chmod") || !strcmp(w.v[i], "chown"))
+        rc = parse_attr(unit, &w, i, lineno, optional, err, errlen);
     else {
         uinit_seterr(err, errlen, "unknown statement '%s'", w.v[i]);
         rc = -1;
@@ -723,8 +956,13 @@ void uinit_unit_free(struct uinit_unit *unit)
             free(st->u.mount.type);
             free(st->u.mount.data);
             break;
+        case UINIT_OP_CHMOD:
+        case UINIT_OP_CHOWN:
+            free(st->u.attr.path);
+            free(st->u.attr.owner);
+            free(st->u.attr.group);
+            break;
         case UINIT_OP_EXEC:
-        case UINIT_OP_SPAWN:
             free(st->u.exec.user);
             free(st->u.exec.group);
             for (j = 0; j < st->u.exec.ngroups; j++)

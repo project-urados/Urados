@@ -7,9 +7,12 @@
  *   --check     Parse the id file and every reachable unit, and run nothing.
  *   -v          Trace each unit, mount and command.
  *
- * As PID 1, uinit never exits. After the entry unit it reaps orphaned processes
- * forever, because exiting PID 1 panics the kernel. Otherwise it exits 0 when
- * the entry unit succeeded and 1 when it failed.
+ * Outside PID 1, uinit exits 0 when the entry unit succeeded, 1 when it failed,
+ * and with the status of an exec mode=exit or mode=exit-nonzero command when
+ * one of those ended the boot.
+ *
+ * As PID 1, uinit never exits. Exiting PID 1 panics the kernel, so after the
+ * boot it reaps orphaned processes forever, and an exit request is only logged.
  */
 #include <limits.h>
 #include <stdio.h>
@@ -80,10 +83,17 @@ int main(int argc, char **argv)
     }
     free(idpath);
 
+    /* An exec mode=exit* ends the boot with its own status, which overrides the boot result. */
+    if (ctx.exit_requested) {
+        rc = ctx.exit_code;
+        if (!pid1 || ctx.check_only)
+            uinit_log("exiting with status %d", rc);
+    }
+
     if (pid1 && !ctx.check_only) {
         if (rc)
-            uinit_log("staying up as PID 1 to reap processes");
+            uinit_log("staying up as PID 1 to reap processes (status %d)", rc);
         uinit_supervise();
     }
-    return rc ? 1 : 0;
+    return rc;
 }

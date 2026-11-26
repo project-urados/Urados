@@ -31,7 +31,7 @@ endif
 
 BUILD = build
 HDRS  = include/uinit.h
-SRCS  = src/main.c src/util.c src/config.c src/parse.c src/run.c src/exec.c src/mount.c
+SRCS  = src/main.c src/util.c src/config.c src/parse.c src/run.c src/exec.c src/attr.c src/mount.c
 
 all: check-deps $(BUILD)/uinit
 
