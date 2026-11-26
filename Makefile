@@ -4,6 +4,8 @@
 #   make              build the package manager and Uinit
 #   make pkg_mgr      build only urpkg and urdev
 #   make uinit        build only Uinit
+#   make uinit STATIC_LIB=blkid
+#                     statically link Uinit's blkid library and dependencies
 #   make test         build, then run the end-to-end suite (needs passwordless
 #                     sudo; see pkg_mgr/tests/test_e2e.sh)
 #   make install      install urpkg and urdev into $(DESTDIR)$(PREFIX)/bin
