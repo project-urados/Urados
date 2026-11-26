@@ -1,6 +1,8 @@
 # uinit: the Urados init system. Runs as PID 1, or standalone with --root.
 #
 #   make              build build/uinit
+#   make STATIC_LIB=blkid
+#                     statically link blkid and its pkg-config dependencies
 #   make test         build, then run the unit tests (the mount tests need
 #                     passwordless sudo and loop devices)
 #   make check-example run uinit --check against examples/root
@@ -15,7 +17,17 @@ PKG_CONFIG ?= pkg-config
 DEPS    = blkid
 CFLAGS += -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Iinclude \
           $(shell $(PKG_CONFIG) --cflags $(DEPS) 2>/dev/null)
+
+# Set STATIC_LIB to a pkg-config module name (for example, blkid) to link
+# that library and the libraries reported by `pkg-config --libs --static` for
+# it from static archives. The package manager is unaffected by this option.
+STATIC_LIB ?=
+ifeq ($(strip $(STATIC_LIB)),)
 LDLIBS += $(shell $(PKG_CONFIG) --libs $(DEPS) 2>/dev/null)
+else
+STATIC_LDLIBS := $(shell $(PKG_CONFIG) --libs --static $(STATIC_LIB) 2>/dev/null)
+LDLIBS += -Wl,-Bstatic $(STATIC_LDLIBS) -Wl,-Bdynamic
+endif
 
 BUILD = build
 HDRS  = include/uinit.h
@@ -33,6 +45,10 @@ check-deps:
 		echo "  Fedora/RHEL:   sudo dnf install libblkid-devel" >&2; \
 		exit 1; \
 	}
+	@if test -n "$(STATIC_LIB)" && test -z "$(STATIC_LDLIBS)"; then \
+		echo "uinit build error: pkg-config module '$(STATIC_LIB)' was not found or has no static link flags" >&2; \
+		exit 1; \
+	fi
 
 $(BUILD)/uinit: check-deps $(SRCS) $(HDRS) | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LDLIBS)
