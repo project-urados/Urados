@@ -33,8 +33,8 @@ UOSS is intended to make collaboration and integration practical: adopters can u
 1. A publisher creates an app directory containing `manifest.xml` and an `app/` payload.
 2. `urdev pack` hashes the package contents and creates an APK/JAR-style SHA-256 metadata set: `META-INF/MANIFEST.MF`, `META-INF/CERT.SF`, and `META-INF/CERT.SIG`. The package also carries the publisher leaf certificate and any intermediate certificates in `SIGNER_CERTS.pem`.
 3. A device administrator installs only public, self-signed CA roots as `.crt` files in `/etc/urados/keys/`.
-4. `urpkg install` accepts a local path or HTTP(S) URL, verifies the certificate chain and package metadata, stores the verified archive as a root-owned `0600` file, creates the app account, and creates its UID-owned private data home.
-5. `urpkg start` takes the per-app lock, verifies the root-owned archive through a pinned file descriptor, extracts a fresh payload into `/run/app/<name>`, atomically publishes it, and launches the mapped manifest entry.
+4. `urpkg install` accepts a local path or HTTP(S) URL, verifies the certificate chain and package metadata, stores the verified archive as a root-owned `0600` file, creates the app account, creates its UID-owned private data home, and configures persistent package permissions.
+5. At boot, Uinit removes a stale `/run` symlink if present, mounts `/run` as tmpfs, and creates `/run/app` as `root:root 0711`. `urpkg start` validates that init-managed parent, takes the installed per-app lock, verifies the root-owned archive through a pinned file descriptor, extracts a fresh payload into `/run/app/<name>`, atomically publishes it, and launches the mapped manifest entry.
 6. The launch runs in a forked child that drops to the app UID/GID, makes root unrecoverable, sets `no_new_privs`, enters the persistent app data home, and clears the inherited environment before exec.
 
 A failed verification or extraction does not replace the previous complete runtime tree. The trusted archive is the source of truth for package verification.
@@ -137,7 +137,7 @@ sudo urpkg install my-app-1.0.0.zip
 sudo urpkg start my-app -- hello world
 ```
 
-`install` stores the signed archive and creates the app's data home. Each `start` verifies the archive and freshly extracts its payload into volatile `/run/app/<name>` before executing it. Persistent app data is stored under `/data/app/<name>/data`; `system_cache/app/` remains the logical manifest entry prefix for package compatibility but is mapped to the runtime payload root.
+`install` stores the signed archive and creates the app's data home and persistent permissions. The init system mounts `/run` as tmpfs and creates `/run/app` as root-owned mode `0711` during boot; `start` validates that parent, verifies the archive, and freshly extracts its payload into `/run/app/<name>` before executing it. Persistent app data is stored under `/data/app/<name>/data`; `system_cache/app/` remains the logical manifest entry prefix for package compatibility but is mapped to the runtime payload root.
 
 For staged testing without touching the host’s `/data` or account files, use the `--root DIR` option. This mode is intentionally not a production security boundary.
 

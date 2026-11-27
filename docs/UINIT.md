@@ -62,6 +62,19 @@ Mount a virtual filesystem without a device:
 mount NONE /proc type=proc opts=nosuid,nodev,noexec
 ```
 
+For the package manager, mount `/run` as a root-owned tmpfs, then create its protected runtime parent before any app starts:
+
+```text
+optional exec -- /bin/busybox rm -f /run
+exec -- /bin/busybox mkdir -p /run
+mount NONE /run type=tmpfs opts=nosuid,nodev,mode=755
+exec -- /bin/busybox mkdir -p /run/app
+chown root:root /run/app
+chmod 0711 /run/app
+```
+
+The optional `rm -f` removes a stale symlink itself (not its target) and tolerates a real directory; `mkdir -p` then guarantees a real mountpoint for the tmpfs. `urpkg start` validates `/run/app`; it does not create or repair it.
+
 Mount by filesystem label, UUID, or disk partition number:
 
 ```text

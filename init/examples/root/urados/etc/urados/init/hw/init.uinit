@@ -6,7 +6,15 @@ log booting ${NAME} ${VERSION} (${CHANNEL})
 mount NONE /proc type=proc opts=nosuid,nodev,noexec
 mount NONE /sys type=sysfs opts=nosuid,nodev,noexec
 mount NONE /dev type=devtmpfs opts=nosuid,noexec
+# Remove a stale /run symlink without following its target; tolerate an existing directory.
+optional exec -- /bin/busybox rm -f /run
+exec -- /bin/busybox mkdir -p /run
 mount NONE /run type=tmpfs opts=nosuid,nodev,mode=755
+# The package manager requires an init-owned runtime parent and will not create
+# or change its permissions while starting an app.
+exec -- /bin/busybox mkdir -p /run/app
+chown root:root /run/app
+chmod 0711 /run/app
 
 # Data partition by label, partition 3 of the first disk by number, and the
 # system partition by UUID. The data mount is optional: a missing device is

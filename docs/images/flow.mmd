@@ -19,15 +19,17 @@ flowchart LR
     subgraph DEVICE[Target device]
         direction TB
         ROOT["/etc/urados/keys/*.crt\nadministrator trust roots"]
+        INITRUN["Uinit boot setup\n/run tmpfs; /run/app root:root 0711"]
         INSTALL["urpkg install\nverify, store archive, create data home"]
         ARCHIVE["/data/app_progs/<name>.zip\nroot:root, 0600"]
         ID["App UID + users group\nprivate data home, 0700"]
-        START["urpkg start <name>\nverify pinned archive"]
+        START["urpkg start <name>\nvalidate /run/app; verify pinned archive"]
         STAGE["Fresh extraction\nrehash every payload file"]
         PUBLISH["Atomic publish\n/run/app/<name>, appUID:root 0570"]
         DROP["Fork child\ndrop UID/GID + no_new_privs"]
         APP["Manifest entry\ncontrolled environment"]
         ROOT -. trust .-> VERIFY
+        INITRUN --> START
         VERIFY --> INSTALL --> ARCHIVE
         INSTALL --> ID
         ARCHIVE --> START --> STAGE --> PUBLISH --> DROP --> APP
@@ -41,7 +43,7 @@ flowchart LR
     classDef storage fill:#e2f0ff,stroke:#316b9e,stroke-width:2px;
     classDef security fill:#e5f6e8,stroke:#2d7545,stroke-width:2px;
     classDef process fill:#fff1d6,stroke:#a56b16,stroke-width:2px;
-    class PROJECT,KEY,CHAIN,ZIP,ROOT,ARCHIVE,DATA storage;
+    class PROJECT,KEY,CHAIN,ZIP,ROOT,ARCHIVE,DATA,INITRUN storage;
     class URDEV,VERIFY,INSTALL,START,STAGE,PUBLISH command;
     class ID,DROP security;
     class APP process;

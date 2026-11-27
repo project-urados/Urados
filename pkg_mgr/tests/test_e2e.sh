@@ -147,11 +147,23 @@ expect_eq "per-app lock is root:root 0600" "0:0 600" "$(stat_of "$ROOT/data/app_
 expect_eq "app parent is root:users 0710" "0:$USERS_GID 710" "$(stat_of "$ROOT/data/app/notes")"
 expect_eq "ordinary app data home is appuid:root 0700" "$NOTES_UID:0 700" "$(stat_of "$ROOT/data/app/notes/data")"
 expect_eq "install does not create a runtime tree before start" "no" "$(sudo -n test -e "$ROOT/run/app/notes" && echo yes || echo no)"
+expect_eq "install does not create the init-managed runtime parent" "no" "$(sudo -n test -e "$ROOT/run/app" && echo yes || echo no)"
 expect_eq "staging area is empty after install" "0" "$(sudo -n ls -A "$ROOT/data/app_progs/.staging" | wc -l)"
 
 echo "== install (account and confinement)"
 expect_eq "app account has no login shell" "/urados/sbin/nologin" "$(awk -F: '$1=="notes"{print $7}' "$ROOT/etc/passwd")"
 expect_eq "app account home is its data home" "/data/app/notes/data" "$(awk -F: '$1=="notes"{print $6}' "$ROOT/etc/passwd")"
+
+# start must not create or change permissions on the init-managed /run/app.
+expect_fail "start does not create missing /run/app" sudo -n "$URPKG" --root "$ROOT" start notes
+expect_eq "failed start leaves /run absent" "no" "$(sudo -n test -e "$ROOT/run" && echo yes || echo no)"
+sudo -n mkdir -p "$ROOT/run/app"
+sudo -n chown 0:0 "$ROOT/run" "$ROOT/run/app"
+sudo -n chmod 0755 "$ROOT/run"
+sudo -n chmod 0777 "$ROOT/run/app"
+expect_fail "start refuses an unsafe /run/app mode" sudo -n "$URPKG" --root "$ROOT" start notes
+expect_eq "start does not repair /run/app permissions" "777" "$(sudo -n stat -c '%a' "$ROOT/run/app")"
+sudo -n chmod 0711 "$ROOT/run/app"
 
 # A leftover app directory is refused by the up-front "already exists" check,
 # before any account or trusted copy is created. The refusal must not remove it.

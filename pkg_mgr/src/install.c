@@ -91,7 +91,7 @@ static int open_owned_at(int base, const char *name, uid_t owner)
 /* Opens <root>/data, creating it as root:root DATA_ROOT_MODE if it is missing.
  * Existing mounts keep their group/mode but must be root-owned and not writable
  * by group or others. */
-static int open_data_root(const pkg_opts *o)
+static int open_data_root(const pkg_opts *o, int create)
 {
     char p[PKG_PATH_MAX];
     struct stat st;
@@ -99,7 +99,7 @@ static int open_data_root(const pkg_opts *o)
 
     rooted(p, sizeof(p), o, PKG_DATA_DIR);
     fd = open(p, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-    if (fd < 0 && errno == ENOENT) {
+    if (fd < 0 && errno == ENOENT && create) {
         if (mkdir(p, DATA_ROOT_MODE) != 0)
             return -1;
         fd = open(p, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
@@ -136,7 +136,7 @@ static int ensure_root_dir(int base, const char *name, mode_t mode)
     return fd;
 }
 
-/* Opens or creates the root-owned /run/app directory (rooted in staged tests). */
+/* Opens the init-managed /run/app directory without creating or chmodding it. */
 static int open_runtime_root(const pkg_opts *o)
 {
     const char *root = o->root[0] ? o->root : "/";
@@ -146,7 +146,7 @@ static int open_runtime_root(const pkg_opts *o)
     root_fd = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (root_fd < 0)
         return -1;
-    run_fd = pkg_open_subdir(root_fd, "run", 0755, 0, 0);
+    run_fd = openat(root_fd, "run", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (run_fd < 0 || fstat(run_fd, &st) != 0 || st.st_uid != 0 || st.st_gid != 0 ||
         (st.st_mode & S_IXOTH) == 0 || (st.st_mode & 0022) != 0) {
         if (run_fd >= 0) close(run_fd);
@@ -154,14 +154,21 @@ static int open_runtime_root(const pkg_opts *o)
         errno = EPERM;
         return -1;
     }
-    app_fd = ensure_root_dir(run_fd, "app", RUN_ROOT_MODE);
+    app_fd = openat(run_fd, "app", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (app_fd >= 0 &&
+        (fstat(app_fd, &st) != 0 || st.st_uid != 0 || st.st_gid != 0 ||
+         (st.st_mode & 07777) != RUN_ROOT_MODE)) {
+        close(app_fd);
+        app_fd = -1;
+        errno = EPERM;
+    }
     close(run_fd);
     close(root_fd);
     return app_fd;
 }
 
 /* Opens and exclusively locks the root-only lock file for one app name. */
-static int lock_app_at(int locks_fd, const char *name)
+static int lock_app_at(int locks_fd, const char *name, int setup_permissions)
 {
     char lock_name[PKG_NAME_MAX + 16];
     struct stat st;
@@ -173,7 +180,8 @@ static int lock_app_at(int locks_fd, const char *name)
         return -1;
     }
     fd = openat(locks_fd, lock_name,
-                O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+                O_RDWR | (setup_permissions ? O_CREAT : 0) |
+                O_NOFOLLOW | O_CLOEXEC, 0600);
     if (fd < 0)
         return -1;
     if (fstat(fd, &st) != 0) {
@@ -187,7 +195,19 @@ static int lock_app_at(int locks_fd, const char *name)
         errno = EPERM;
         return -1;
     }
-    if (fchown(fd, 0, 0) != 0 || fchmod(fd, 0600) != 0 || flock(fd, LOCK_EX) != 0) {
+    if (setup_permissions && (fchown(fd, 0, 0) != 0 || fchmod(fd, 0600) != 0)) {
+        int saved = errno;
+        close(fd);
+        errno = saved;
+        return -1;
+    }
+    if (!setup_permissions &&
+        (st.st_gid != 0 || (st.st_mode & 07777) != 0600)) {
+        close(fd);
+        errno = EPERM;
+        return -1;
+    }
+    if (flock(fd, LOCK_EX) != 0) {
         int saved = errno;
         close(fd);
         errno = saved;
@@ -398,7 +418,7 @@ int pkg_cmd_install(const char *source, const pkg_opts *o)
 
     rooted(progs_path, sizeof(progs_path), o, PKG_PROGS_DIR);
 
-    data_fd = open_data_root(o);
+    data_fd = open_data_root(o, 1);
     if (data_fd < 0) {
         msg_err("cannot open data directory: %s", strerror(errno));
         goto out;
@@ -447,7 +467,7 @@ int pkg_cmd_install(const char *source, const pkg_opts *o)
     snprintf(name, sizeof(name), "%s", v.manifest.name);
     snprintf(archive_name, sizeof(archive_name), "%s%s", name, PKG_ARCHIVE_SUFFIX);
 
-    app_lock_fd = lock_app_at(locks_fd, name);
+    app_lock_fd = lock_app_at(locks_fd, name, 1);
     if (app_lock_fd < 0) {
         msg_err("cannot lock app '%s' for installation: %s", name, strerror(errno));
         goto out;
@@ -648,7 +668,7 @@ int pkg_cmd_start(const char *name, int argc, char **argv, const pkg_opts *o)
         return 1;
     }
     snprintf(archive_name, sizeof(archive_name), "%s%s", name, PKG_ARCHIVE_SUFFIX);
-    data_fd = open_data_root(o);
+    data_fd = open_data_root(o, 0);
     if (data_fd < 0) {
         msg_err("cannot open the data directory (must be root-owned and not writable by group/others): %s",
                 strerror(errno));
@@ -666,7 +686,7 @@ int pkg_cmd_start(const char *name, int argc, char **argv, const pkg_opts *o)
         msg_err("per-app lock directory is missing or unsafe");
         goto out;
     }
-    lock_fd = lock_app_at(locks_fd, name);
+    lock_fd = lock_app_at(locks_fd, name, 0);
     if (lock_fd < 0) {
         msg_err("cannot lock app '%s' for start: %s", name, strerror(errno));
         goto out;
@@ -718,7 +738,8 @@ int pkg_cmd_start(const char *name, int argc, char **argv, const pkg_opts *o)
     }
     runtime_fd = open_runtime_root(o);
     if (runtime_fd < 0) {
-        msg_err("cannot open or prepare %s: %s", PKG_RUN_DIR, strerror(errno));
+        msg_err("cannot open init-managed %s (expected root:root mode 0711): %s",
+                PKG_RUN_DIR, strerror(errno));
         goto out;
     }
 

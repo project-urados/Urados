@@ -15,18 +15,23 @@ An app's name is both its Unix user name and its folder and file name on ext4, s
 | `/data/app` | `root:root`, `0711` | Traversal-only parent. |
 | `/data/app/<app>` | `root:users`, `0710` | Protected app parent; app users can traverse but cannot list or replace its entries. |
 | `/data/app/<app>/data` | `<app-UID>:root`, `0700` | Persistent app-private writable data; group and other have no permissions. |
-| `/run/app` | `root:root`, `0711` | Root-managed parent for volatile runtime trees. |
+| `/run` | `root:root`, `0755` tmpfs | Init-managed volatile filesystem; must be a real directory/mountpoint, not an app-owned symlink. |
+| `/run/app` | `root:root`, `0711` | Created and secured by init at boot; `urpkg start` only validates it. |
 | `/run/app/<app>` and payload entries | `<app-UID>:root`, `0570` | Freshly verified runtime payload; app-owner gets `r-x`, GID 0 gets `rwx`, other gets no access. |
 
 App processes have their own UID and exactly the shared `users` group, not GID 0. When the process UID matches a file's owner, Unix permission checks use the owner bits, so the runtime's GID-0 `rwx` group permissions do not give the app write access under the initial `0570` modes. The root-owned `/run/app` parent is not writable by apps, which prevents an app from replacing its top-level runtime entry. If `/data` is absent, the package manager creates it as root:root mode `0711`; an existing `/data` must be root-owned and not writable by group or others, and its group/mode are preserved so mounted data filesystems are not unexpectedly changed. Persistent data is stored separately at `/data/app/<app>/data` and is created with no group or other permissions.
 
 ## Package lifecycle and process start
 
-`urpkg install <package.zip>` verifies the signed package, stores the root-owned archive at `/data/app_progs/<name>.zip`, creates the app account, and creates its private data home. It does not extract package code into persistent storage.
+`urpkg install <package.zip>` verifies the signed package, stores the root-owned archive at `/data/app_progs/<name>.zip`, creates the app account, creates its private data home, and sets up persistent package-store permissions. It does not extract package code into persistent storage.
 
-`urpkg start <name>` takes the per-app lock, opens the root-owned archive without following symlinks, verifies the signature and package metadata through that pinned file descriptor, then extracts the signed payload into a fresh hidden sibling under `/run/app`. Each payload byte is checked against its signed digest while being written. Once the full extract succeeds, it is atomically published as `/run/app/<name>` and the manifest entry is launched from that directory. The existing manifest entry prefix `system_cache/app/` is retained for package compatibility; the part after that prefix maps to the payload root under `/run/app/<name>`.
+The init system removes any stale `/run` symlink itself, creates a real mountpoint, mounts `/run` as a root-owned tmpfs, and creates `/run/app` as `root:root 0711` during boot. `urpkg start` does not create or chmod `/run/app`; it refuses to start if this init-managed directory is missing or has unsafe ownership/mode.
+
+`urpkg start <name>` takes the per-app lock, opens the root-owned archive without following symlinks, verifies the signature and package metadata through that pinned file descriptor, then extracts the signed payload into a fresh hidden sibling under `/run/app`. Each payload byte is checked against its signed digest while being written. Once the full extract succeeds, it is atomically published as `/run/app/<name>` and the manifest entry is launched from that directory. The existing manifest entry prefix `system_cache/app/` is retained for package compatibility; the part after that prefix maps to the payload root under `/run/app/<name>`. Start validates persistent directory and lock permissions but does not create or repair them; use install to set those up.
 
 A failed signature check or extraction never launches the package and leaves the previous complete runtime tree intact. The next successful `start` replaces that tree with a new extraction from the verified archive. `/run` is normally volatile, so runtime trees are naturally cleared on reboot; the data home is persistent.
+
+Installation configures the persistent package store, lock files, app parent, and private data home. At runtime, `urpkg start` validates those persistent permissions and the init-created `/run/app` parent; it does not create or repair them. It does create and permission the app-specific staging/payload tree as part of extracting the verified archive into volatile storage.
 
 Each app process is started by the root `urpkg` process in a forked child that:
 

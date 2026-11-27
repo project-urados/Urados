@@ -164,7 +164,7 @@ After installation, the trusted archive is stored at:
 /run/app/<name>/            app-UID:root, mode 0570 (verified volatile payload)
 ```
 
-The package archive is the source of truth for verification. Failed verification or extraction does not replace the previous complete runtime tree. The `0570` runtime permissions give the app owner read/execute and GID 0 read/write/execute; the app runs with its separate `users` GID, so it receives only owner permissions. Because the runtime tree is owned by the app UID, it can chmod its own files/directories; each successful `start` verifies and freshly extracts the trusted archive before launching. See [App filesystem and execution model](APP-SANDBOX.md) for these permission-model limits.
+The init system must mount `/run` as a root-owned tmpfs and create `/run/app` as `root:root 0711` during boot. `urpkg start` only validates that parent and will not create or change its permissions. Start also validates persistent package-store permissions but does not set them up; installation does that. The package archive is the source of truth for verification. Failed verification or extraction does not replace the previous complete runtime tree. The `0570` runtime permissions give the app owner read/execute and GID 0 read/write/execute; the app runs with its separate `users` GID, so it receives only owner permissions. Because the runtime tree is owned by the app UID, it can chmod its own files/directories; each successful `start` verifies and freshly extracts the trusted archive before launching. See [App filesystem and execution model](APP-SANDBOX.md) for these permission-model limits.
 
 ## Staged operation and testing
 
