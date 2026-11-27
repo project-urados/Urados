@@ -2,15 +2,13 @@
  * install.c - urpkg commands: install, start, verify.
  *
  * install  Verify a certificate-signed package, create its app identity and
- *          separate data/cache directories, then extract its initial code.
- * start    Verify the root-owned package copy, refresh package code and run it.
+ *          private data home, and store the trusted archive.
+ * start    Verify the root-owned package copy, extract it under /run/app and run it.
  * verify   Check a package file against trusted X.509 CA certificates.
  *
- * start verifies /data/app_progs/<name>.zip rather than anything under
- * /data/app/<name>/system_cache. The separate root-owned data subtree is
- * writable by its app UID through ACLs; the mutable code cache is writable and
- * executable by the app but is not trusted as signed package content.
- * system_cache/user remains mutable across starts.
+ * start verifies /data/app_progs/<name>.zip, then extracts a new runtime tree
+ * under /run/app/<name> and executes its verified manifest entry. Persistent
+ * state lives only in the app-UID-owned /data/app/<name>/data directory.
  *
  * Failed installs are rolled back: the account, trusted copy and protected app
  * tree are removed, so a failed install leaves no partial installation.
@@ -32,12 +30,12 @@
 
 #include "urados_pkg.h"
 
+#define DATA_ROOT_MODE 0711  /* root:root; traverse-only, no directory listing */
 #define APP_DIR_MODE   0710  /* root:users; app users can traverse, not list */
 #define APPS_ROOT_MODE 0711  /* /data/app: traverse only */
-#define APP_DATA_MODE  0770  /* root:users; ACL gives app RWX, group ACL is empty */
-#define CACHE_MODE     02730 /* root:users; ACL gives owning app WX, root RWX */
-#define CODE_MODE      02770 /* root:users; ACL gives owning app RWX */
-#define CODE_DIR       "app"
+#define APP_DATA_MODE  0700  /* app UID:root; no group or other access */
+#define RUN_ROOT_MODE  0711  /* root:root; runtime parent, traverse only */
+#define RUNTIME_MODE   0570  /* app UID:root; owner r-x, root group rwx */
 #define PKG_BUSYBOX    "/bin/busybox"
 #define LOCKS_DIR      ".locks"
 
@@ -90,22 +88,31 @@ static int open_owned_at(int base, const char *name, uid_t owner)
     return fd;
 }
 
-/* Opens <root>/data, creating it (root:root 0755) only if it is missing. */
+/* Opens <root>/data as root:root DATA_ROOT_MODE, creating it if it is missing. */
 static int open_data_root(const pkg_opts *o)
 {
     char p[PKG_PATH_MAX];
+    struct stat st;
     int fd;
 
     rooted(p, sizeof(p), o, PKG_DATA_DIR);
     fd = open(p, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0 && errno == ENOENT) {
-        if (mkdir(p, 0755) != 0)
+        if (mkdir(p, DATA_ROOT_MODE) != 0)
             return -1;
         fd = open(p, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-        if (fd >= 0 && (fchown(fd, 0, 0) != 0 || fchmod(fd, 0755) != 0)) {
+        if (fd >= 0 && (fchown(fd, 0, 0) != 0 || fchmod(fd, DATA_ROOT_MODE) != 0)) {
             close(fd);
             return -1;
         }
+    }
+    if (fd < 0)
+        return -1;
+    if (fstat(fd, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != 0 ||
+        st.st_gid != 0 || fchmod(fd, DATA_ROOT_MODE) != 0) {
+        close(fd);
+        errno = EPERM;
+        return -1;
     }
     return fd;
 }
@@ -122,6 +129,30 @@ static int ensure_root_dir(int base, const char *name, mode_t mode)
         return -1;
     }
     return fd;
+}
+
+/* Opens or creates the root-owned /run/app directory (rooted in staged tests). */
+static int open_runtime_root(const pkg_opts *o)
+{
+    const char *root = o->root[0] ? o->root : "/";
+    struct stat st;
+    int root_fd = -1, run_fd = -1, app_fd = -1;
+
+    root_fd = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (root_fd < 0)
+        return -1;
+    run_fd = pkg_open_subdir(root_fd, "run", 0755, 0, 0);
+    if (run_fd < 0 || fstat(run_fd, &st) != 0 || st.st_uid != 0 || st.st_gid != 0 ||
+        (st.st_mode & S_IXOTH) == 0 || (st.st_mode & 0022) != 0) {
+        if (run_fd >= 0) close(run_fd);
+        close(root_fd);
+        errno = EPERM;
+        return -1;
+    }
+    app_fd = ensure_root_dir(run_fd, "app", RUN_ROOT_MODE);
+    close(run_fd);
+    close(root_fd);
+    return app_fd;
 }
 
 /* Opens and exclusively locks the root-only lock file for one app name. */
@@ -171,15 +202,15 @@ static int lock_app_at(int locks_fd, const char *name)
     return fd;
 }
 
-/* Creates a randomized sibling directory for a fully verified package extract. */
-static int create_code_staging_dir(int cache_fd, uid_t uid, gid_t gid,
-                                   char *name, size_t namelen)
+/* Creates a randomized sibling directory for a fully verified runtime extract. */
+static int create_runtime_staging_dir(int runtime_fd, uid_t uid, gid_t gid,
+                                      char *name, size_t namelen)
 {
     char path[128];
     const char *base;
     int fd;
 
-    if (snprintf(path, sizeof(path), "/proc/self/fd/%d/.urpkg-new-XXXXXX", cache_fd) >=
+    if (snprintf(path, sizeof(path), "/proc/self/fd/%d/.urpkg-new-XXXXXX", runtime_fd) >=
         (int)sizeof(path)) {
         errno = ENAMETOOLONG;
         return -1;
@@ -188,18 +219,17 @@ static int create_code_staging_dir(int cache_fd, uid_t uid, gid_t gid,
         return -1;
     base = strrchr(path, '/') + 1;
     if (strlen(base) >= namelen) {
-        unlinkat(cache_fd, base, AT_REMOVEDIR);
+        unlinkat(runtime_fd, base, AT_REMOVEDIR);
         errno = ENAMETOOLONG;
         return -1;
     }
     snprintf(name, namelen, "%s", base);
-    fd = openat(cache_fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-    if (fd < 0 || fchown(fd, 0, gid) != 0 || fchmod(fd, CODE_MODE) != 0 ||
-        pkg_set_app_uid_acl(fd, uid, 1) != 0) {
+    fd = openat(runtime_fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0 || fchown(fd, uid, gid) != 0 || fchmod(fd, RUNTIME_MODE) != 0) {
         int saved = errno;
         if (fd >= 0)
             close(fd);
-        pkg_rm_entry_at(cache_fd, name, 0);
+        pkg_rm_entry_at(runtime_fd, name, 0);
         errno = saved;
         return -1;
     }
@@ -207,17 +237,18 @@ static int create_code_staging_dir(int cache_fd, uid_t uid, gid_t gid,
 }
 
 /* Atomically publishes the extracted tree, preserving the old tree on failure. */
-static int publish_code_staging_dir(int cache_fd, const char *staging_name)
+static int publish_code_staging_dir(int runtime_fd, const char *staging_name,
+                                    const char *target_name)
 {
     int exchanged = 0, i;
 
     for (i = 0; i < 4; i++) {
-        if (renameat2(cache_fd, staging_name, cache_fd, CODE_DIR, RENAME_EXCHANGE) == 0) {
+        if (renameat2(runtime_fd, staging_name, runtime_fd, target_name, RENAME_EXCHANGE) == 0) {
             exchanged = 1;
             break;
         }
         if (errno == ENOENT) {
-            if (renameat2(cache_fd, staging_name, cache_fd, CODE_DIR, RENAME_NOREPLACE) == 0)
+            if (renameat2(runtime_fd, staging_name, runtime_fd, target_name, RENAME_NOREPLACE) == 0)
                 break;
             if (errno == EEXIST)
                 continue;
@@ -230,7 +261,7 @@ static int publish_code_staging_dir(int cache_fd, const char *staging_name)
     }
     /* After exchange, staging_name is the old tree; cleanup is best effort. */
     if (exchanged)
-        pkg_rm_entry_at(cache_fd, staging_name, 0);
+        pkg_rm_entry_at(runtime_fd, staging_name, 0);
     return 0;
 }
 
@@ -285,11 +316,11 @@ static int account_exists(const pkg_opts *o, const char *name)
 static int create_account(const pkg_opts *o, const char *name, const char *home)
 {
     if (o->root[0] != '\0') {
-        /* Staged test roots use host shadow-utils because BusyBox has no prefix mode. */
-        const char *u[] = { "-M", "-N", "-d", home, "-s", "/usr/sbin/nologin",
+        /* Staged test roots use host shadow-utils from PATH; BusyBox has no prefix mode. */
+        const char *u[] = { "-M", "-N", "-d", home, "-s", "/urados/sbin/nologin",
                             "-g", PKG_APP_GROUP, name };
 
-        if (run_stage_acct(o, "/usr/sbin/useradd", u,
+        if (run_stage_acct(o, "useradd", u,
                            sizeof(u) / sizeof(u[0])) != 0) {
             msg_err("staged useradd %s failed", name);
             return -1;
@@ -299,7 +330,7 @@ static int create_account(const pkg_opts *o, const char *name, const char *home)
 
     /* BusyBox uses -G for the primary group and -h/-s for passwd fields. */
     {
-        const char *u[] = { "-D", "-H", "-h", home, "-s", "/usr/sbin/nologin",
+        const char *u[] = { "-D", "-H", "-h", home, "-s", "/urados/sbin/nologin",
                             "-G", PKG_APP_GROUP, name };
 
         if (run_busybox_acct("adduser", u, sizeof(u) / sizeof(u[0])) != 0) {
@@ -315,7 +346,7 @@ static void remove_account(const pkg_opts *o, const char *name)
     const char *a[] = { name };
 
     if (o->root[0] != '\0') {
-        run_stage_acct(o, "/usr/sbin/userdel", a, 1);
+        run_stage_acct(o, "userdel", a, 1);
     } else if (run_busybox_acct("deluser", a, 1) != 0) {
         msg_err("BusyBox deluser %s failed during install rollback", name);
     }
@@ -343,15 +374,13 @@ int pkg_cmd_install(const char *source, const pkg_opts *o)
     char progs_path[PKG_PATH_MAX];
     char stage_tmpl[PKG_PATH_MAX * 2];
     char archive_name[PKG_NAME_MAX + sizeof(PKG_ARCHIVE_SUFFIX)];
-    char *trusted_zip = NULL;
     char name[PKG_NAME_MAX + 1] = "";
     char home[PKG_PATH_MAX];
     const char *stage_name = NULL;
     pkg_verified v;
     struct stat st;
     int data_fd = -1, progs_fd = -1, locks_fd = -1, stage_fd = -1, app_lock_fd = -1;
-    int appdata_fd = -1, app_fd = -1, app_data_fd = -1, cache_fd = -1;
-    int code_fd = -1, user_code_fd = -1;
+    int appdata_fd = -1, app_fd = -1, app_data_fd = -1;
     int staged = 0, trusted_copy_made = 0, acct_made = 0, app_made = 0;
     int tfd, rc = 1;
     uid_t uid = 0, pgid = 0;
@@ -466,42 +495,17 @@ int pkg_cmd_install(const char *source, const pkg_opts *o)
         msg_err("new user '%s' does not have primary group '%s'", name, PKG_APP_GROUP);
         goto out;
     }
-    /* 3. Protect the app parent so the app cannot replace system_cache. */
+    /* 3. Protect the app parent; the app owns only its private data home. */
     app_made = 1;
     app_fd = pkg_open_subdir(appdata_fd, name, APP_DIR_MODE, 0, usersgid);
     if (app_fd < 0) {
         msg_err("cannot create %s: %s", home, strerror(errno));
         goto out;
     }
-    app_data_fd = pkg_open_subdir(app_fd, PKG_APP_DATA_SUBDIR, APP_DATA_MODE, 0, usersgid);
-    if (app_data_fd < 0 || fchown(app_data_fd, 0, usersgid) != 0 ||
-        fchmod(app_data_fd, APP_DATA_MODE) != 0 || pkg_set_app_uid_acl(app_data_fd, uid, 1) != 0) {
+    app_data_fd = pkg_open_subdir(app_fd, PKG_APP_DATA_SUBDIR, APP_DATA_MODE, uid, 0);
+    if (app_data_fd < 0 || fchown(app_data_fd, uid, 0) != 0 ||
+        fchmod(app_data_fd, APP_DATA_MODE) != 0) {
         msg_err("cannot create app data directory %s: %s", home, strerror(errno));
-        goto out;
-    }
-    cache_fd = pkg_open_subdir(app_fd, PKG_CACHE_DIR, CACHE_MODE, 0, usersgid);
-    if (cache_fd < 0 || fchown(cache_fd, 0, usersgid) != 0 ||
-        fchmod(cache_fd, CACHE_MODE) != 0 || pkg_set_app_uid_acl(cache_fd, uid, 0) != 0) {
-        msg_err("cannot create %s/%s: %s", home, PKG_CACHE_DIR, strerror(errno));
-        goto out;
-    }
-    code_fd = pkg_open_subdir(cache_fd, CODE_DIR, CODE_MODE, 0, usersgid);
-    user_code_fd = pkg_open_subdir(cache_fd, PKG_CACHE_USER_DIR, CODE_MODE, 0, usersgid);
-    if (code_fd < 0 || user_code_fd < 0 || fchown(code_fd, 0, usersgid) != 0 ||
-        fchmod(code_fd, CODE_MODE) != 0 || pkg_set_app_uid_acl(code_fd, uid, 1) != 0 ||
-        fchown(user_code_fd, 0, usersgid) != 0 || fchmod(user_code_fd, CODE_MODE) != 0 ||
-        pkg_set_app_uid_acl(user_code_fd, uid, 1) != 0) {
-        msg_err("cannot prepare writable program directories under %s/%s: %s",
-                home, PKG_CACHE_DIR, strerror(errno));
-        goto out;
-    }
-    if (asprintf(&trusted_zip, "%s/%s", progs_path, archive_name) < 0) {
-        trusted_zip = NULL;
-        msg_err("out of memory building trusted package path");
-        goto out;
-    }
-    if (pkg_extract(trusted_zip, code_fd, usersgid, &v, err, sizeof(err)) != 0) {
-        msg_err("cannot extract the verified package: %s", err);
         goto out;
     }
 
@@ -522,9 +526,6 @@ out:
         unlinkat(stage_fd, stage_name, 0);
     pkg_verified_free(&v);
     if (app_lock_fd >= 0) close(app_lock_fd);
-    if (user_code_fd >= 0) close(user_code_fd);
-    if (code_fd >= 0) close(code_fd);
-    if (cache_fd >= 0) close(cache_fd);
     if (app_data_fd >= 0) close(app_data_fd);
     if (app_fd >= 0) close(app_fd);
     if (appdata_fd >= 0) close(appdata_fd);
@@ -532,7 +533,6 @@ out:
     if (locks_fd >= 0) close(locks_fd);
     if (progs_fd >= 0) close(progs_fd);
     if (data_fd >= 0) close(data_fd);
-    free(trusted_zip);
     return rc;
 }
 
@@ -543,7 +543,8 @@ out:
  *   2. supplementary groups = {users}, then setgid, then setuid;
  *   3. confirm root cannot be regained;
  *   4. set no_new_privs, so setuid/setgid binaries cannot raise privilege;
- *   5. enter the app data home, clear the environment, exec the entry.
+ *   5. enter the app data home, clear the environment, exec the verified
+ *      package entry under /run/app/<name>.
  * no_new_privs is a plain kernel flag; no MAC policy is involved.
  */
 static int run_entry(const pkg_opts *o, const char *name, uid_t uid, gid_t gid,
@@ -565,7 +566,8 @@ static int run_entry(const pkg_opts *o, const char *name, uid_t uid, gid_t gid,
      * host account configuration. */
     groups[0] = gid;
     snprintf(home, sizeof(home), "%s/%s/%s", PKG_APPDATA_DIR, name, PKG_APP_DATA_SUBDIR);
-    snprintf(path, sizeof(path), "%s/%s/%s", PKG_APPDATA_DIR, name, entry);
+    snprintf(path, sizeof(path), "%s/%s/%s", PKG_RUN_DIR, name,
+             entry + strlen(PKG_ENTRY_PREFIX));
     snprintf(userenv, sizeof(userenv), "USER=%s", name);
     snprintf(homeenv, sizeof(homeenv), "HOME=%s", home);
     app_argv[n++] = path;
@@ -619,7 +621,7 @@ int pkg_cmd_start(const char *name, int argc, char **argv, const pkg_opts *o)
     pkg_verified v;
     struct stat st;
     int data_fd = -1, progs_fd = -1, locks_fd = -1, lock_fd = -1;
-    int appdata_fd = -1, app_fd = -1, app_data_fd = -1, cache_fd = -1;
+    int appdata_fd = -1, app_fd = -1, app_data_fd = -1, runtime_fd = -1;
     int code_fd = -1, zip_fd = -1, code_tmp_created = 0;
     int rc = 1;
     uid_t uid = 0, pgid = 0;
@@ -685,7 +687,7 @@ int pkg_cmd_start(const char *name, int argc, char **argv, const pkg_opts *o)
         goto out;
     }
 
-    /* 2. Validate the root-protected parent and the distinct app data home. */
+    /* 2. Validate the protected parent and UID-owned private data home. */
     appdata_fd = open_dir_at(data_fd, "app");
     if (appdata_fd < 0) {
         msg_err("cannot open %s%s", o->root, PKG_APPDATA_DIR);
@@ -701,58 +703,52 @@ int pkg_cmd_start(const char *name, int argc, char **argv, const pkg_opts *o)
         msg_err("%s/%s has unsafe ownership or permissions", PKG_APPDATA_DIR, name);
         goto out;
     }
-    app_data_fd = open_owned_at(app_fd, PKG_APP_DATA_SUBDIR, 0);
-    if (app_data_fd < 0 || fstat(app_data_fd, &st) != 0 || st.st_gid != usersgid ||
+    app_data_fd = open_owned_at(app_fd, PKG_APP_DATA_SUBDIR, uid);
+    if (app_data_fd < 0 || fstat(app_data_fd, &st) != 0 || st.st_gid != 0 ||
         (st.st_mode & 07777) != APP_DATA_MODE) {
         msg_err("%s/%s/%s has unsafe ownership or permissions",
                 PKG_APPDATA_DIR, name, PKG_APP_DATA_SUBDIR);
         goto out;
     }
-    cache_fd = open_owned_at(app_fd, PKG_CACHE_DIR, 0);
-    if (cache_fd < 0) {
-        msg_err("%s/%s/%s is missing or not owned by root", PKG_APPDATA_DIR, name, PKG_CACHE_DIR);
-        goto out;
-    }
-    if (fstat(cache_fd, &st) != 0 || st.st_gid != usersgid ||
-        (st.st_mode & 07777) != CACHE_MODE) {
-        msg_err("%s/%s/%s has unsafe ownership or permissions",
-                PKG_APPDATA_DIR, name, PKG_CACHE_DIR);
+    runtime_fd = open_runtime_root(o);
+    if (runtime_fd < 0) {
+        msg_err("cannot open or prepare %s: %s", PKG_RUN_DIR, strerror(errno));
         goto out;
     }
 
     /* 3. Extract into a hidden sibling, then atomically publish the complete
-     * verified tree. Failed extraction leaves the prior tree untouched. */
-    code_fd = create_code_staging_dir(cache_fd, uid, usersgid,
-                                      code_tmp_name, sizeof(code_tmp_name));
+     * verified tree as /run/app/<name>. Failed extraction leaves the prior tree intact. */
+    code_fd = create_runtime_staging_dir(runtime_fd, uid, 0,
+                                         code_tmp_name, sizeof(code_tmp_name));
     if (code_fd < 0) {
-        msg_err("cannot create package-code staging directory: %s", strerror(errno));
+        msg_err("cannot create runtime staging directory: %s", strerror(errno));
         goto out;
     }
     code_tmp_created = 1;
-    if (pkg_extract(zip_fd_path, code_fd, usersgid, &v, err, sizeof(err)) != 0) {
-        msg_err("cannot extract the verified package: %s", err);
+    if (pkg_extract(zip_fd_path, code_fd, uid, 0, &v, err, sizeof(err)) != 0) {
+        msg_err("cannot extract the verified package to %s: %s", PKG_RUN_DIR, err);
         goto out;
     }
     close(code_fd);
     code_fd = -1;
-    if (publish_code_staging_dir(cache_fd, code_tmp_name) != 0) {
-        msg_err("cannot atomically publish the refreshed package code: %s", strerror(errno));
+    if (publish_code_staging_dir(runtime_fd, code_tmp_name, name) != 0) {
+        msg_err("cannot atomically publish the runtime tree: %s", strerror(errno));
         goto out;
     }
     code_tmp_created = 0;
 
-    /* 4. Run the manifest entry only after the signed payload is extracted. */
+    /* 4. Run the manifest entry only after signature and payload verification. */
     rc = run_entry(o, name, uid, usersgid, v.manifest.entry, argc, argv);
     if (rc < 0)
         rc = 1;
 
 out:
     if (code_fd >= 0) close(code_fd);
-    if (code_tmp_created && cache_fd >= 0)
-        pkg_rm_entry_at(cache_fd, code_tmp_name, 0);
+    if (code_tmp_created && runtime_fd >= 0)
+        pkg_rm_entry_at(runtime_fd, code_tmp_name, 0);
     if (zip_fd >= 0) close(zip_fd);
     if (lock_fd >= 0) close(lock_fd);
-    if (cache_fd >= 0) close(cache_fd);
+    if (runtime_fd >= 0) close(runtime_fd);
     if (app_data_fd >= 0) close(app_data_fd);
     if (app_fd >= 0) close(app_fd);
     if (appdata_fd >= 0) close(appdata_fd);

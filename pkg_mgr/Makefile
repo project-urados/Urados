@@ -1,7 +1,7 @@
 # Urados package tools: urpkg (package manager) and urdev (developer tool).
 #
 # Requires gcc, pkg-config, and development files for libxml-2.0, libzip,
-# libcurl, OpenSSL 3 and libacl. E2E tests also need passwordless sudo.
+# libcurl and OpenSSL 3. E2E tests also need passwordless sudo.
 #
 #   make        build build/urpkg and build/urdev
 #   make STATIC=1
@@ -14,7 +14,7 @@
 CC     ?= cc
 CFLAGS ?= -O2 -g
 PKG_CONFIG ?= pkg-config
-DEPS    = libxml-2.0 libzip libcurl libcrypto libacl
+DEPS    = libxml-2.0 libzip libcurl libcrypto
 CFLAGS += -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Iinclude \
           $(shell $(PKG_CONFIG) --cflags $(DEPS) 2>/dev/null)
 

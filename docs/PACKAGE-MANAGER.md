@@ -124,7 +124,7 @@ Start an installed application and pass arguments after the application name:
 sudo urpkg start my-app -- hello world
 ```
 
-`urpkg start` verifies the root-owned archive again, extracts a fresh package-code tree, atomically publishes it, drops privileges in the child process, sets `no_new_privs`, clears the inherited environment, and executes the manifest entry.
+`urpkg install` verifies and stores the signed archive, creates the app identity, and creates its private data home. It does not persist an extracted package-code tree. `urpkg start` verifies the root-owned archive again, extracts the payload into a fresh tree under `/run/app/<name>`, atomically publishes it, drops privileges in the child process, sets `no_new_privs`, clears the inherited environment, and executes the manifest entry from that runtime tree. The established manifest prefix `system_cache/app/` remains accepted for package compatibility and is mapped to the payload root under `/run/app/<name>`.
 
 ## Command reference
 
@@ -157,14 +157,14 @@ On the device (without `--root`), `urpkg` resolves existing users and groups thr
 After installation, the trusted archive is stored at:
 
 ```text
-/data/app_progs/<name>.zip          root:root, mode 0600
-/data/app_progs/.locks/             root-only per-app locks
-/data/app/<name>/data/              app-private writable data
-/data/app/<name>/system_cache/app/  extracted package programs
-/data/app/<name>/system_cache/user/ app-created mutable programs
+/data                       root:root, mode 0711 (traverse-only root)
+/data/app_progs/<name>.zip  root:root, mode 0600 (trusted archive)
+/data/app_progs/.locks/     root-only per-app locks
+/data/app/<name>/data/      app-UID:root, mode 0700 (persistent app data)
+/run/app/<name>/            app-UID:root, mode 0570 (verified volatile payload)
 ```
 
-The package archive is the source of truth for verification. Failed verification or extraction does not replace the previous complete package-code tree. The application sandbox and its limitations are documented in [App filesystem and execution model](APP-SANDBOX.md).
+The package archive is the source of truth for verification. Failed verification or extraction does not replace the previous complete runtime tree. The `0570` runtime permissions give the app owner read/execute and GID 0 read/write/execute; the app runs with its separate `users` GID, so it receives only owner permissions. Because the runtime tree is owned by the app UID, it can chmod its own files/directories; each successful `start` verifies and freshly extracts the trusted archive before launching. See [App filesystem and execution model](APP-SANDBOX.md) for these permission-model limits.
 
 ## Staged operation and testing
 
@@ -183,4 +183,4 @@ The staged mode is useful for tests, but a plain chroot-style path prefix is not
 make test
 ```
 
-The end-to-end tests require passwordless `sudo` and ACL tools. Review the output and verify the target device separately; passing staged tests does not prove the host's account, mount, or filesystem configuration.
+The end-to-end tests require passwordless `sudo`. Review the output and verify the target device separately; passing staged tests does not prove the host's account, mount, or filesystem configuration.

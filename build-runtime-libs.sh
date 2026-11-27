@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Build the shared third-party libraries used by Urados into a staged target
 # filesystem. The logical runtime prefix is always /urados; DESTDIR is only the
 # host-side staging directory.
@@ -15,7 +15,7 @@
 # shared library is staged; see docs/BUILD.md.
 #
 # The script builds libraries only where the upstream build system permits it.
-# It intentionally does not alter the host /usr, /lib, or /etc.
+# It intentionally does not alter the host's system directories.
 
 set -Eeuo pipefail
 
@@ -776,5 +776,5 @@ Use these paths when configuring Urados against the staged libraries:
 The target image should receive the contents of:
   $TARGET_DIR  ->  $PREFIX
 
-The script does not install anything into the host's /usr, /lib, or /etc.
+The script does not install anything into the host's system directories.
 EOF

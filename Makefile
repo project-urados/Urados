@@ -15,7 +15,7 @@
 # each component. A target only checks the dependencies of the component it
 # builds.
 
-PREFIX  ?= /usr/local
+PREFIX  ?= /urados/local
 DESTDIR ?=
 
 PKG_MGR = pkg_mgr

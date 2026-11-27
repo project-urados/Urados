@@ -21,7 +21,6 @@ The package manager additionally requires development metadata and libraries for
 - libzip (`libzip`)
 - libcurl (`libcurl`)
 - OpenSSL 3 (`libcrypto`)
-- libacl (`libacl`)
 
 Uinit additionally requires the util-linux `libblkid` development package (`blkid`).
 
@@ -31,7 +30,7 @@ Uinit additionally requires the util-linux `libblkid` development package (`blki
 sudo apt update
 sudo apt install \
   build-essential pkg-config \
-  libxml2-dev libzip-dev libcurl4-openssl-dev libssl-dev libacl1-dev \
+  libxml2-dev libzip-dev libcurl4-openssl-dev libssl-dev \
   libblkid-dev
 ```
 
@@ -46,7 +45,7 @@ sudo apt install build-essential pkg-config libblkid-dev
 ```sh
 sudo dnf install \
   gcc make pkgconf-pkg-config \
-  libxml2-devel libzip-devel libcurl-devel openssl-devel libacl-devel \
+  libxml2-devel libzip-devel libcurl-devel openssl-devel \
   libblkid-devel
 ```
 
@@ -109,7 +108,7 @@ make uinit
 make test
 ```
 
-This builds the package manager, runs certificate tests, runs the extraction-limit test, and runs the staged end-to-end suite. The end-to-end suite requires passwordless `sudo`, ACL utilities such as `getfacl`, and the host's normal filesystem tools. Its staged root is under `pkg_mgr/build/test/root`; it does not intentionally modify the host's `/data` tree or account database.
+This builds the package manager, runs certificate tests, runs the extraction-limit test, and runs the staged end-to-end suite. The end-to-end suite requires passwordless `sudo` and the host's normal filesystem tools. Its staged root is under `pkg_mgr/build/test/root`; it does not intentionally modify the host's `/data` tree or account database.
 
 ### Uinit
 
@@ -130,7 +129,7 @@ make -C init check-example
 
 ## Installation
 
-The root `install` target installs only the package-manager tools because their `/usr/local/bin` destination is suitable for ordinary command-line use:
+The root `install` target installs the package-manager tools into `/urados/local/bin`, the relocated local-install destination:
 
 ```sh
 sudo make install
@@ -139,10 +138,10 @@ sudo make install
 Override the destination when packaging a filesystem image:
 
 ```sh
-make install DESTDIR="$PWD/stage" PREFIX=/usr
+make install DESTDIR="$PWD/stage" PREFIX=/urados
 ```
 
-This creates `stage/usr/bin/urpkg` and `stage/usr/bin/urdev`.
+This creates `stage/urados/bin/urpkg` and `stage/urados/bin/urdev`.
 
 Uinit is a boot component and does not have a generic `make install` destination. Install it into the target image's intended PID 1 location as part of the image or initramfs integration, preserving the target system's ownership, mode, and boot configuration.
 

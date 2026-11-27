@@ -1,8 +1,6 @@
 # App filesystem and execution model
 
-Urados gives each app exactly one Unix user. Every app user has the same primary group, `users`; there are no per-app Unix groups. Because a shared group alone cannot isolate writable data and caches, the root installer applies POSIX ACLs keyed to each app UID. The shared group ACL grants no access to another app's directories.
-
-Confinement uses only standard UNIX mechanisms: a distinct UID per app, file modes, POSIX ACLs, and the kernel `no_new_privs` flag. No mandatory access control (SELinux or otherwise) is used.
+Urados gives each app exactly one Unix user. App users share the global primary group `users`; there are no per-app Unix groups. Access isolation uses ordinary Unix ownership, mode bits, distinct UIDs, and the kernel `no_new_privs` flag. POSIX ACLs and mandatory access control are not used by the package manager.
 
 An app's name is both its Unix user name and its folder and file name on ext4, so it must match `[a-z_][a-z0-9_-]*` and be at most 32 bytes. Names containing `/`, `.`, upper case, spaces or control characters are refused before any account or file is created.
 
@@ -10,49 +8,52 @@ An app's name is both its Unix user name and its folder and file name on ext4, s
 
 | Path | Owner, group, mode | Purpose |
 | --- | --- | --- |
+| `/data` | `root:root`, `0711` | Root-managed data root; traverse-only, with no directory listing for other users. |
 | `/data/app_progs` | `root:root`, `0700` | Root-only package store. |
-| `/data/app_progs/.locks` | `root:root`, `0700` | Per-app locks serialize installation state changes and each start's archive verification, extraction, and launch. |
-| `/data/app_progs/<app>.zip` | `root:root`, `0600` | Verified, root-protected signed package archive. |
+| `/data/app_progs/.locks` | `root:root`, `0700` | Per-app locks serialize installation and each start's verification, extraction, and launch. |
+| `/data/app_progs/<app>.zip` | `root:root`, `0600` | Trusted signed package archive. |
 | `/data/app` | `root:root`, `0711` | Traversal-only parent. |
 | `/data/app/<app>` | `root:users`, `0710` | Protected app parent; app users can traverse but cannot list or replace its entries. |
-| `/data/app/<app>/data` | `root:users`, `0770`, per-UID ACL | Writable only by the matching app UID; `group::---`. Root ownership prevents the app from chmodding the home to expose it to the shared group. |
-| `/data/app/<app>/system_cache` | `root:users`, setgid `2730`, per-UID ACL | Root has `rwx`; this app UID has `-wx`; the owning `users` group ACL has no permissions. |
-| `/data/app/<app>/system_cache/app` | `root:users`, setgid `2770`, per-UID ACL | Package programs; the owning app UID has `rwx`, other users in `users` have none. |
-| `/data/app/<app>/system_cache/user` | `root:users`, setgid `2770`, per-UID ACL | App-created code and programs; only that app UID gets `rwx`. |
-| `/urados/bin/user` | Administrator-managed, read-only to apps | Trusted utilities, including BusyBox and command symlinks such as `sh`, `ls`, and `cp`. |
+| `/data/app/<app>/data` | `<app-UID>:root`, `0700` | Persistent app-private writable data; group and other have no permissions. |
+| `/run/app` | `root:root`, `0711` | Root-managed parent for volatile runtime trees. |
+| `/run/app/<app>` and payload entries | `<app-UID>:root`, `0570` | Freshly verified runtime payload; app-owner gets `r-x`, GID 0 gets `rwx`, other gets no access. |
 
-The data-home ACL grants RWX only to its app UID, and its default entries constrain inherited group permissions. Since the app does not own the home directory, it cannot widen the ACL or change the directory mode to admit other `users` members. The ACL default entries are also inherited by new files and directories under the two code directories. Package payload files are root-owned and group-owned by `users`; the named-user ACL grants access to the matching app UID. One app cannot list, read, write, or execute another app's data or cache merely because both accounts share the primary group.
+App processes have their own UID and exactly the shared `users` group, not GID 0. When the process UID matches a file's owner, Unix permission checks use the owner bits, so the runtime's GID-0 `rwx` group permissions do not give the app write access under the initial `0570` modes. The root-owned `/run/app` parent is not writable by apps, which prevents an app from replacing its top-level runtime entry. The package manager requires `/data` to be root-owned and resets its mode to `0711`, allowing fixed-path traversal without exposing directory listings. Persistent data is stored separately at `/data/app/<app>/data` and is created with no group or other permissions.
 
 ## Package lifecycle and process start
 
-`urpkg install <package.zip>` verifies the certificate chain and signature, then atomically reserves and stores the trusted archive as `/data/app_progs/<manifest-name>.zip`, creates the app account and cache directories, and extracts the signed payload under `/data/app/<name>/system_cache/app`. `urpkg start <name>` takes the same per-app lock, opens the root-owned `/data/app_progs/<name>.zip` without following symlinks, verifies and extracts through that pinned file descriptor, builds a temporary package-code tree, atomically swaps it into `system_cache/app`, and runs the manifest entry. Failed verification or extraction leaves the prior complete package tree in place. The separate `system_cache/user` directory is available for app-created programs and remains mutable across starts. The trusted ZIP, not the cache, is the source used for package verification.
+`urpkg install <package.zip>` verifies the signed package, stores the root-owned archive at `/data/app_progs/<name>.zip`, creates the app account, and creates its private data home. It does not extract package code into persistent storage.
+
+`urpkg start <name>` takes the per-app lock, opens the root-owned archive without following symlinks, verifies the signature and package metadata through that pinned file descriptor, then extracts the signed payload into a fresh hidden sibling under `/run/app`. Each payload byte is checked against its signed digest while being written. Once the full extract succeeds, it is atomically published as `/run/app/<name>` and the manifest entry is launched from that directory. The existing manifest entry prefix `system_cache/app/` is retained for package compatibility; the part after that prefix maps to the payload root under `/run/app/<name>`.
+
+A failed signature check or extraction never launches the package and leaves the previous complete runtime tree intact. The next successful `start` replaces that tree with a new extraction from the verified archive. `/run` is normally volatile, so runtime trees are naturally cleared on reboot; the data home is persistent.
 
 Each app process is started by the root `urpkg` process in a forked child that:
 
 1. (`--root` staging only) changes root to the staging tree;
-2. sets its supplementary groups to exactly `{users}`, then its GID, then its UID;
-3. checks that `setuid(0)` now fails, so root cannot be regained;
-4. sets `no_new_privs`, so `setuid`/`setgid` binaries and file capabilities cannot raise its privilege again;
-5. enters its data home, sets `umask 0077`, clears the environment to `PATH=/urados/bin/user`, `HOME`, `USER` and `LANG`, and execs the manifest entry.
+2. sets supplementary groups to exactly `{users}`, then sets the primary GID and app UID;
+3. checks that `setuid(0)` now fails;
+4. sets `no_new_privs`, so setuid/setgid binaries and file capabilities cannot raise its privilege again;
+5. enters the app's data home, sets `umask 0077`, clears the inherited environment to `PATH=/urados/bin/user`, `HOME`, `USER` and `LANG`, and execs the verified entry under `/run/app/<name>`.
 
 The UID/GID drop and `no_new_privs` are the privilege boundary.
 
-## What UNIX permissions do not stop
+## Permission-model limits
 
-The UNIX-only model is weaker than the previous SELinux type model in one respect that matters:
+The requested runtime ownership makes the app UID the owner of `/run/app/<name>` and of its payload files. The initial `0570` modes give the app read/execute but not write; however, Unix owners may change permissions on their own files and directories. Therefore this is a default read/execute state, not an immutable package tree: an app can chmod or alter its own runtime tree after launch. The package manager's guarantee is that it verifies and freshly extracts the signed package before each `start`; a later start replaces runtime modifications with the trusted payload. For a stronger guarantee that the tree remains unmodifiable even by its owner, the runtime files/directories must not be owned by the app UID (for example, use root ownership with a named-user read/execute ACL, or a separately enforced read-only mount).
 
-- **Execution from `data/` is not blocked.** An app can write a program into `/data/app/<app>/data` and execute it, because `data/` is writable by its app UID and the filesystem is not mounted `noexec`. The former SELinux rule that labelled ordinary app data non-executable no longer exists. If that boundary is required, mount the data area with `noexec` (which must then not apply to `system_cache`, so it needs its own mount) or add a separate control.
-- **Interpreted scripts are not blocked.** A trusted shell can run any readable script, including one in `data/`, regardless of mount options.
-- **Same-UID isolation is not provided.** Two processes of the same app share its UID; the boundary is between apps, not within one app.
+The app also owns its `data/` directory and can change its own mode. The directory starts at `0700` with no group/other permissions, but an app that deliberately chmods its data home or files can expose them to other local users subject to parent traversal permissions. Ownership-based privacy is the default; the owner is trusted with its own data.
 
-The `--root DIR` staging mode is not a security boundary. It uses a plain chroot and is for tests only.
+Other limitations of the UNIX-only model:
 
-## Scripts and mutable code
+- **Data execution is not blocked.** An app can write a program into its own data home and execute it unless the filesystem is separately mounted `noexec`. Interpreted scripts can still be run by a trusted interpreter.
+- **Same-UID isolation is not provided.** Two processes of the same app share its UID and can access that app's runtime and data.
+- **No MAC policy is used.** There is no SELinux/AppArmor policy confining path access beyond normal UNIX permissions.
 
-The generated package template uses `/urados/bin/user/sh`, the externally supplied BusyBox shell symlink. Apps can start further code directly from `system_cache`; that area is intentionally mutable. The package manager verifies the root-protected ZIP at install/start but does not treat the mutable cache as a trusted copy.
+The `--root DIR` staging mode is not a security boundary. It uses a plain chroot for tests and development only.
 
 ## Migration and verification
 
-Existing installations that used SELinux user mappings (`<name>_u`, login mappings in the SELinux policy store) or per-app groups need manual cleanup: remove the local SELinux user and login records (`semanage login -d <name>`, `semanage user -d <name>_u`), ensure each app's primary group is `users`, remove obsolete app-specific groups only when safe, place each root-protected archive at `/data/app_progs/<app>.zip`, and recreate cache ACLs. `urpkg` no longer creates or reads SELinux records.
+Existing installations that used the old persistent `system_cache` directories or ACL-based data homes need migration. Keep the root-protected archive at `/data/app_progs/<app>.zip`, recreate `/data/app/<app>/data` as owned by that app UID with group 0 and mode `0700`, and remove obsolete `system_cache` trees after verifying that any app-created files which must persist are backed up. Reboot or clear old runtime entries under `/run/app` after upgrading. Existing SELinux mappings (`<name>_u`) or per-app groups also need manual cleanup; ensure app accounts have primary group `users` and remove obsolete group or SELinux records only when safe. `urpkg` does not migrate old ACLs or SELinux records automatically.
 
-Run `make test` for certificate and filesystem end-to-end coverage. The end-to-end suite needs passwordless `sudo` and `getfacl`. Passing the staged tests does not prove the layout on a device; on the target, verify that the app runs as its own UID with group `users`, that one app cannot read or write another app's data or cache, and that the isolation holds for files the app itself creates.
+Run `make test` for certificate and filesystem end-to-end coverage. The end-to-end suite needs passwordless `sudo`. On the target, verify the `/run` filesystem is writable by root and volatile, each app runs as its own UID with group `users`, runtime trees have owner app UID/group 0/mode `0570`, private data homes have owner app UID/group 0/mode `0700`, and another app cannot access them by default. Passing staged tests does not prove the host's account, mount, or filesystem configuration.

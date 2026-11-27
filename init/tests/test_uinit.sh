@@ -5,7 +5,7 @@
 # passwordless sudo. Mount tests also need loop devices and sfdisk/mkfs.ext4.
 # Everything the suite creates is under build/test and is removed on exit.
 set -eu
-PATH="$PATH:/usr/sbin:/sbin"
+PATH="$PATH:/sbin:/urados/sbin"
 export PATH
 
 HERE=$(cd "$(dirname "$0")/.." && pwd)

@@ -4,13 +4,13 @@
  *   urpkg  - package manager: install / start / verify. Runs as root.
  *   urdev  - developer tool: init / check / keygen / pack.
  *
- * Confinement is UNIX-only: a distinct UID per app, the shared users GID, POSIX
- * ACLs keyed to that UID, and no_new_privs on the app process. No MAC policy.
+ * Confinement is UNIX-only: a distinct UID per app, the shared users GID,
+ * private UID-owned data, root-group runtime code permissions, and no_new_privs.
  *
  * Package format: a zip archive containing
  *   manifest.xml             XML manifest (schema in src/manifest.c)
  *   SIGNER_CERTS.pem         required PEM leaf/intermediate X.509 chain
- *   app/<rel>                payload files, installed as system_cache/app/<rel>
+ *   app/<rel>                payload files, run from /run/app/<name>/<rel>
  *   META-INF/MANIFEST.MF     APK/JAR-style SHA-256 digest of every file above
  *   META-INF/CERT.SF         SHA-256 digest of MANIFEST.MF and of each of its sections
  *   META-INF/CERT.SIG        publisher signature over the exact bytes of CERT.SF
@@ -22,21 +22,21 @@
  * file invalidates the package.
  *
  * Installed layout (every device path is prefixed by --root when one is given):
+ *   /data/                                  root:root 0711   traverse-only data root
  *   /data/app_progs/                        root:root 0700   root only
  *   /data/app_progs/.locks/                 root:root 0700   install/start serialization
  *   /data/app_progs/.staging/               root:root 0700   install staging
  *   /data/app_progs/<name>.zip              root:root 0600   trusted package
  *   /data/app/                              root:root 0711   traverse only
  *   /data/app/<name>/                       root:users 0710, parent protected
- *   /data/app/<name>/data/                  root:users 0770 + per-UID ACL, app-private data
- *   /data/app/<name>/system_cache/          root:users 2730 + per-UID ACL, app WX
- *   /data/app/<name>/system_cache/app/      root:users 2770 + per-UID ACL
- *   /data/app/<name>/system_cache/user/     root:users 2770 + per-UID ACL
+ *   /data/app/<name>/data/                  app UID:root 0700, private data
+ *   /run/app/                               root:root 0711, runtime parent
+ *   /run/app/<name>/                        app UID:root 0570, verified runtime tree
  *
- * Every app user has the single shared primary group 'users'. POSIX ACLs grant
- * access to each app's data home and cache only to its UID; shared group entries
- * have no permissions. Root owns the data-home directory so an app cannot
- * chmod it to expose files to other members of 'users'.
+ * Every app user has the single shared primary group 'users'. Runtime entries
+ * are owned by the app UID with group 0: the owner gets read/execute, while
+ * root-group operations get read/write/execute. Data homes have no group or
+ * other permissions.
  */
 #ifndef URADOS_PKG_H
 #define URADOS_PKG_H
@@ -76,9 +76,8 @@
 #define PKG_STAGING_DIR    ".staging"
 #define PKG_APPDATA_DIR    "/data/app"
 #define PKG_APP_DATA_SUBDIR "data"
+#define PKG_RUN_DIR        "/run/app"
 #define PKG_APP_GROUP      "users"            /* primary group of app users */
-#define PKG_CACHE_DIR      "system_cache"
-#define PKG_CACHE_USER_DIR "user"
 #define PKG_USER_UTILS     "/urados/bin/user"
 #define PKG_ZIP_APP_PREFIX "app/"             /* payload prefix inside the zip */
 #define PKG_ENTRY_PREFIX   "system_cache/app/"/* manifest <entry> prefix */
@@ -161,7 +160,7 @@ int  pkg_meta_verify(const unsigned char *mf, size_t mflen, const unsigned char 
 /* archive.c */
 int  pkg_verify(const char *zip_path, const char *keys_dir, pkg_verified *v,
                 char *err, size_t errlen);
-int  pkg_extract(const char *zip_path, int appfd, gid_t gid, const pkg_verified *v,
+int  pkg_extract(const char *zip_path, int appfd, uid_t uid, gid_t gid, const pkg_verified *v,
                  char *err, size_t errlen);
 void pkg_verified_free(pkg_verified *v);
 
@@ -175,7 +174,6 @@ int  pkg_rm_entry_at(int dirfd, const char *name, int depth);
 int  pkg_open_subdir(int dirfd, const char *name, mode_t mode, uid_t uid, gid_t gid);
 int  pkg_lookup_passwd(const char *root, const char *name, uid_t *uid, gid_t *gid);
 int  pkg_lookup_group(const char *root, const char *name, gid_t *gid);
-int  pkg_set_app_uid_acl(int fd, uid_t app_uid, int app_read);
 
 /* fetch.c */
 int  pkg_fetch(const char *src, int fd, size_t max, char *err, size_t errlen);

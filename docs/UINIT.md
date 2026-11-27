@@ -82,7 +82,7 @@ optional mount LABEL=optional-data /data opts=nosuid,nodev
 
 ```text
 exec -- /bin/sh -c "echo boot-step-done"
-spawn -- /usr/bin/example-service
+spawn -- /urados/bin/example-service
 ```
 
 Commands can run under a specified identity when Uinit has the privileges required to change it:

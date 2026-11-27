@@ -37,7 +37,6 @@ stat_of()   { sudo -n stat -c '%u:%g %a' "$1"; }
 echo "== build"
 make -C "$HERE" all >/dev/null
 sudo -n true
-command -v getfacl >/dev/null 2>&1 || { echo "E2E tests require getfacl (acl package)" >&2; exit 1; }
 
 echo "== prepare"
 sudo -n rm -rf "$T"
@@ -139,25 +138,17 @@ expect_eq "app user's primary group matches the staged users group" "$USERS_GID"
 expect_eq "app uses the global users primary group only" "$USERS_GID" "$(awk -F: '$1=="notes"{print $4}' "$ROOT/etc/passwd")"
 NOTES_UID=$(awk -F: '$1=="notes"{print $3}' "$ROOT/etc/passwd")
 expect_eq "no per-app Unix group is created" "0" "$(sudo -n grep -c '^notes:' "$ROOT/etc/group" || true)"
+expect_eq "data root is root:root 0711" "0:0 711" "$(stat_of "$ROOT/data")"
 expect_eq "trusted copy is root:root 0600" "0:0 600" "$(stat_of "$ROOT/data/app_progs/notes.zip")"
 expect_eq "app_progs is root:root 0700" "0:0 700" "$(stat_of "$ROOT/data/app_progs")"
 expect_eq "per-app lock is root:root 0600" "0:0 600" "$(stat_of "$ROOT/data/app_progs/.locks/app-notes.lock")"
 expect_eq "app parent is root:users 0710" "0:$USERS_GID 710" "$(stat_of "$ROOT/data/app/notes")"
-expect_eq "ordinary app data home is root:users 0770" "0:$USERS_GID 770" "$(stat_of "$ROOT/data/app/notes/data")"
-expect_eq "data home ACL grants RWX only to its app UID" "1" "$(sudo -n getfacl -ncp "$ROOT/data/app/notes/data" | grep -Fxc "user:$NOTES_UID:rwx")"
-expect_eq "data home shared-group ACL grants no access" "1" "$(sudo -n getfacl -ncp "$ROOT/data/app/notes/data" | grep -Fxc 'group::---')"
-expect_eq "data files inherit the owning app UID ACL" "1" "$(sudo -n getfacl -ncp "$ROOT/data/app/notes/data" | grep -Fxc "default:user:$NOTES_UID:rwx")"
-expect_eq "data files inherit no shared-group access" "1" "$(sudo -n getfacl -ncp "$ROOT/data/app/notes/data" | grep -Fxc 'default:group::---')"
-expect_eq "system_cache is root:users setgid 2730" "0:$USERS_GID 2730" "$(stat_of "$ROOT/data/app/notes/system_cache")"
-expect_eq "system_cache grants only this app UID WX" "1" "$(sudo -n getfacl -ncp "$ROOT/data/app/notes/system_cache" | grep -Fxc "user:$NOTES_UID:-wx")"
-expect_eq "system_cache group ACL grants no access" "1" "$(sudo -n getfacl -ncp "$ROOT/data/app/notes/system_cache" | grep -Fxc 'group::---')"
-expect_eq "package code folder is root:users setgid 2770" "0:$USERS_GID 2770" "$(stat_of "$ROOT/data/app/notes/system_cache/app")"
-expect_eq "package code ACL grants this app RWX" "1" "$(sudo -n getfacl -ncp "$ROOT/data/app/notes/system_cache/app" | grep -Fxc "user:$NOTES_UID:rwx")"
-expect_eq "generated-code folder is root:users setgid 2770" "0:$USERS_GID 2770" "$(stat_of "$ROOT/data/app/notes/system_cache/user")"
+expect_eq "ordinary app data home is appuid:root 0700" "$NOTES_UID:0 700" "$(stat_of "$ROOT/data/app/notes/data")"
+expect_eq "install does not create a runtime tree before start" "no" "$(sudo -n test -e "$ROOT/run/app/notes" && echo yes || echo no)"
 expect_eq "staging area is empty after install" "0" "$(sudo -n ls -A "$ROOT/data/app_progs/.staging" | wc -l)"
 
 echo "== install (account and confinement)"
-expect_eq "app account has no login shell" "/usr/sbin/nologin" "$(awk -F: '$1=="notes"{print $7}' "$ROOT/etc/passwd")"
+expect_eq "app account has no login shell" "/urados/sbin/nologin" "$(awk -F: '$1=="notes"{print $7}' "$ROOT/etc/passwd")"
 expect_eq "app account home is its data home" "/data/app/notes/data" "$(awk -F: '$1=="notes"{print $6}' "$ROOT/etc/passwd")"
 
 # A leftover app directory is refused by the up-front "already exists" check,
@@ -184,34 +175,29 @@ expect_eq "start returns the entry point's exit status" "0" "$RC"
 expect_eq "entry runs as the app user" "1" "$(grep -c "^uid=$APP_UID " "$T/run.log")"
 expect_eq "entry gets only the shared users group, not extra memberships" "1" "$(grep -c "^groups=$USERS_GID$" "$T/run.log")"
 expect_eq "entry receives its arguments" "2" "$(grep -c '^arg=' "$T/run.log")"
-expect_eq "entry can write its mutable system_cache" "1" "$(grep -c '^cache_write=ok' "$T/run.log")"
-expect_eq "entry cannot list the top-level system_cache" "1" "$(grep -c '^cache_list=denied' "$T/run.log")"
-expect_eq "entry cannot rename system_cache" "1" "$(grep -c '^rename_cache=denied' "$T/run.log")"
+expect_eq "runtime directory has appuid:root 0570 permissions" "1" "$(grep -c '^runtime_dir=appuid:root 570$' "$T/run.log")"
+expect_eq "runtime entry has appuid:root 0570 permissions" "1" "$(grep -c '^runtime_file=appuid:root 570$' "$T/run.log")"
+expect_eq "entry cannot write its verified package file" "1" "$(grep -c '^runtime_file_write=denied' "$T/run.log")"
+expect_eq "entry cannot create files in its runtime directory" "1" "$(grep -c '^runtime_create=denied' "$T/run.log")"
+expect_eq "entry cannot replace its /run/app entry" "1" "$(grep -c '^rename_runtime=denied' "$T/run.log")"
+expect_eq "entry can list its own runtime payload" "1" "$(grep -c '^runtime_list=ok' "$T/run.log")"
 expect_eq "entry can read its own package code" "1" "$(grep -c '^read_extra=ok' "$T/run.log")"
-expect_eq "entry can execute generated code in its own cache" "1" "$(grep -c '^cache_generated_exec=ok' "$T/run.log")"
 expect_eq "entry cannot regain root" "1" "$(grep -c '^setuid0=denied' "$T/run.log")"
 expect_eq "entry runs with no_new_privs set" "1" "$(grep -c '^no_new_privs=1$' "$T/run.log")"
 expect_eq "entry can write its own data" "1" "$(grep -c '^data_write=ok' "$T/run.log")"
 expect_eq "probe reports PASS" "1" "$(grep -c '^probe=PASS' "$T/run.log")"
 expect_eq "data file is owned by the app user" "$NOTES_UID" "$(sudo -n stat -c '%u' "$ROOT/data/app/notes/data/probe-data.txt")"
-expect_eq "app-created data file has no shared-group ACL permissions" "1" "$(sudo -n getfacl -ncp "$ROOT/data/app/notes/data/probe-data.txt" | grep -Fxc 'group::---')"
-expect_fail "app cannot chmod its root-owned data home" sudo -n "$URPKG" --root "$ROOT" start notes --op chmod /data/app/notes/data
-expect_eq "the chmod failure is due to protected data-home ownership" "1" "$(grep -c 'chmod /data/app/notes/data: denied' "$T/last.log")"
-expect_eq "installed program is root:users 0770" "0:$USERS_GID 770" "$(stat_of "$ROOT/data/app/notes/system_cache/app/notes")"
-expect_eq "installed program ACL grants only this app UID" "1" "$(sudo -n getfacl -ncp "$ROOT/data/app/notes/system_cache/app/notes" | grep -Fxc "user:$NOTES_UID:rwx")"
-expect_eq "app-created executable is owned by its app UID" "$NOTES_UID" "$(sudo -n stat -c '%u' "$ROOT/data/app/notes/system_cache/user/generated-probe")"
-expect_eq "app-created executable has no shared-group ACL permissions" "1" "$(sudo -n getfacl -ncp "$ROOT/data/app/notes/system_cache/user/generated-probe" | grep -Fxc 'group::---')"
-sudo -n touch "$ROOT/data/app/notes/system_cache/root-write-check"
-expect_eq "root can create entries in the cache" "0:$USERS_GID 660" "$(stat_of "$ROOT/data/app/notes/system_cache/root-write-check")"
-sudo -n rm -f "$ROOT/data/app/notes/system_cache/root-write-check"
+expect_eq "app-created data file has no group permissions" "600" "$(sudo -n stat -c '%a' "$ROOT/data/app/notes/data/probe-data.txt")"
+expect_eq "runtime package entry is appuid:root 0570" "$NOTES_UID:0 570" "$(stat_of "$ROOT/run/app/notes/notes")"
+expect_eq "runtime parent is root:root 0711" "0:0 711" "$(stat_of "$ROOT/run/app")"
 
-sudo -n cp /bin/false "$ROOT/data/app/notes/system_cache/app/notes"
+sudo -n cp /bin/false "$ROOT/run/app/notes/notes"
 expect_ok "start refreshes package code from the trusted ZIP" sudo -n "$URPKG" --root "$ROOT" start notes
 expect_eq "refreshed package entry executes successfully" "0" \
     "$(sudo -n "$URPKG" --root "$ROOT" start notes >"$T/refreshed.log" 2>&1; echo $?)"
-expect_eq "app-created code remains available across starts" "yes" \
-    "$(sudo -n test -x "$ROOT/data/app/notes/system_cache/user/generated-probe" && echo yes || echo no)"
-sudo -n rm -rf "$ROOT/data/app/notes/system_cache/app"
+expect_eq "verified runtime entry remains available after start" "yes" \
+    "$(sudo -n test -x "$ROOT/run/app/notes/notes" && echo yes || echo no)"
+sudo -n rm -rf "$ROOT/run/app/notes"
 expect_ok "start recreates a missing package-code tree from the trusted ZIP" sudo -n "$URPKG" --root "$ROOT" start notes
 expect_eq "recreated package entry runs successfully" "1" "$(grep -c '^probe=PASS' "$T/last.log")"
 
@@ -219,12 +205,12 @@ echo "== start (refusals)"
 sudo -n cp "$T/tampered.zip" "$ROOT/data/app_progs/notes.zip"
 expect_fail "a tampered trusted copy is not run" sudo -n "$URPKG" --root "$ROOT" start notes
 expect_eq "failed verification leaves the prior complete package tree intact" "yes" \
-    "$(sudo -n test -f "$ROOT/data/app/notes/system_cache/app/extra.txt" && echo yes || echo no)"
+    "$(sudo -n test -f "$ROOT/run/app/notes/extra.txt" && echo yes || echo no)"
 sudo -n cp "$T/notes-1.0.0.zip" "$ROOT/data/app_progs/notes.zip"
 expect_fail "starting an app that was never installed fails" sudo -n "$URPKG" --root "$ROOT" start nosuchapp
 expect_ok "start works again after the trusted copy is restored" sudo -n "$URPKG" --root "$ROOT" start notes
 
-echo "== per-app cache isolation"
+echo "== per-app isolation"
 expect_ok "install a second certificate-signed app" sudo -n "$URPKG" --root "$ROOT" install "$T/other-1.0.0.zip"
 sudo -n chmod 0644 "$ROOT/data/app/notes/data/probe-data.txt"
 set +e
@@ -233,16 +219,23 @@ sudo -n "$URPKG" --root "$ROOT" start other --op read \
 RC=$?
 set -e
 expect_eq "other app cannot read notes data even when its file is group-readable" "1" "$RC"
-expect_eq "cross-app data read is denied by the protected home ACL" "1" "$(grep -c 'denied' "$T/cross-data.log")"
+expect_eq "cross-data read is denied by the private app-owned home" "1" "$(grep -c 'denied' "$T/cross-data.log")"
 set +e
-sudo -n "$URPKG" --root "$ROOT" start other --op write \
-    /data/app/notes/system_cache/user/cross-app-marker >"$T/cross-app.log" 2>&1
+sudo -n "$URPKG" --root "$ROOT" start other --op read \
+    /run/app/notes/extra.txt >"$T/cross-runtime-read.log" 2>&1
 RC=$?
 set -e
-expect_eq "other app cannot write into notes system_cache" "1" "$RC"
-expect_eq "cross-app write was denied by per-app DAC" "1" "$(grep -c 'denied' "$T/cross-app.log")"
-expect_eq "cross-app marker was not created" "no" \
-    "$(sudo -n test -e "$ROOT/data/app/notes/system_cache/user/cross-app-marker" && echo yes || echo no)"
+expect_eq "other app cannot read notes runtime payload" "1" "$RC"
+expect_eq "cross-runtime read is denied by per-app DAC" "1" "$(grep -c 'denied' "$T/cross-runtime-read.log")"
+set +e
+sudo -n "$URPKG" --root "$ROOT" start other --op write \
+    /run/app/notes/cross-app-marker >"$T/cross-app.log" 2>&1
+RC=$?
+set -e
+expect_eq "other app cannot write into notes runtime" "1" "$RC"
+expect_eq "cross-app runtime write was denied by per-app DAC" "1" "$(grep -c 'denied' "$T/cross-app.log")"
+expect_eq "cross-app runtime marker was not created" "no" \
+    "$(sudo -n test -e "$ROOT/run/app/notes/cross-app-marker" && echo yes || echo no)"
 
 echo
 echo "passed: $PASS  failed: $FAIL"

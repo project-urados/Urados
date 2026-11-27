@@ -3,7 +3,8 @@
  *
  * Project layout (the developer's source tree):
  *   <dir>/manifest.xml   package manifest (schema in manifest.c)
- *   <dir>/app/...        payload, installed as system_cache/app/...
+ *   <dir>/app/...        payload, run from /run/app/<name>/... (manifest entry
+ *                        keeps the system_cache/app/ compatibility prefix)
  *
  * pack hashes every file with SHA-256, builds META-INF/MANIFEST.MF and
  * META-INF/CERT.SF (see meta_files.c), signs CERT.SF with the publisher key

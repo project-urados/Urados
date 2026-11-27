@@ -58,6 +58,17 @@ esac
 IPC_DIR="$ROOT/run/ipc/user"
 IPC_PARENT="$ROOT/run/ipc"
 
+mount_info() {
+    if command -v findmnt >/dev/null 2>&1 && findmnt -M "$IPC_DIR" >/dev/null 2>&1; then
+        printf '%s %s\n' "$(findmnt -M "$IPC_DIR" -no FSTYPE)" \
+            "$(findmnt -M "$IPC_DIR" -no OPTIONS)"
+        return 0
+    fi
+    awk -v target="$IPC_DIR" \
+        '$2 == target { print $3, $4; found = 1; exit }
+         END { if (!found) exit 1 }' /proc/mounts
+}
+
 if ! getent group "$GROUP_NAME" >/dev/null 2>&1; then
     die "group '$GROUP_NAME' does not exist"
 fi
@@ -66,25 +77,35 @@ GID=$(getent group "$GROUP_NAME" | cut -d: -f3)
 # /run/ipc is traversal-only for everyone (urados_path_dir_t).
 mkdir -p "$IPC_PARENT"
 chown root:root "$IPC_PARENT" 2>/dev/null || true
-chmod 0755 "$IPC_PARENT"
+chmod 0711 "$IPC_PARENT"
 
 mkdir -p "$IPC_DIR"
 
 if [ "$DO_MOUNT" -eq 1 ]; then
     [ "$(id -u)" -eq 0 ] || die "mounting the IPC tmpfs requires root (or use --no-mount)"
 
-    # Only mount once. If already a mountpoint, verify its options instead.
-    if command -v findmnt >/dev/null 2>&1 && findmnt -M "$IPC_DIR" >/dev/null 2>&1; then
-        OPTS=$(findmnt -M "$IPC_DIR" -no OPTIONS)
-    else
+    # Only mount once. If already mounted, validate type and all hardening flags.
+    MOUNT_INFO=$(mount_info 2>/dev/null || true)
+    if [ -z "$MOUNT_INFO" ]; then
         mount -t tmpfs -o "size=$SIZE,mode=2770,uid=0,gid=$GID,noexec,nosuid,nodev" \
             tmpfs "$IPC_DIR"
-        OPTS=$(findmnt -M "$IPC_DIR" -no OPTIONS 2>/dev/null || echo "noexec")
+        MOUNT_INFO=$(mount_info) || die "cannot verify the IPC tmpfs mount"
     fi
+    FSTYPE=${MOUNT_INFO%% *}
+    OPTS=${MOUNT_INFO#* }
+    [ "$FSTYPE" = "tmpfs" ] || die "$IPC_DIR is not mounted as tmpfs (type: $FSTYPE)"
 
     case ",$OPTS," in
         *,noexec,*) ;;
         *) die "$IPC_DIR is not mounted noexec (options: $OPTS)" ;;
+    esac
+    case ",$OPTS," in
+        *,nosuid,*) ;;
+        *) die "$IPC_DIR is not mounted nosuid (options: $OPTS)" ;;
+    esac
+    case ",$OPTS," in
+        *,nodev,*) ;;
+        *) die "$IPC_DIR is not mounted nodev (options: $OPTS)" ;;
     esac
 fi
 

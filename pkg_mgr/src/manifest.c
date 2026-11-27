@@ -6,7 +6,8 @@
  *   <package>
  *     <name>notes</name>                         required, pkg_name_valid
  *     <version>1.2.0</version>                   required, pkg_version_valid
- *     <entry>system_cache/app/bin/notes</entry>  required, under system_cache/app/
+ *     <entry>system_cache/app/bin/notes</entry>  required compatibility prefix;
+ *                                                 runtime maps suffix to /run/app/<name>
  *     <label>Notes</label>                       optional
  *     <description>...</description>             optional
  *     <author>...</author>                       optional

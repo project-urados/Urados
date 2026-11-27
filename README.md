@@ -1,6 +1,6 @@
 # Urados
 
-Urados is a full operating system built around a secure, native Linux application runtime. It provides the system foundation, device integration points, package lifecycle, and application isolation needed to operate a complete device or product environment. Application isolation uses only standard UNIX mechanisms (users, file modes, POSIX ACLs, and `no_new_privs`); there is no SELinux policy.
+Urados is a full operating system built around a secure, native Linux application runtime. It provides the system foundation, device integration points, package lifecycle, and application isolation needed to operate a complete device or product environment. Application isolation uses standard UNIX users, file modes, and `no_new_privs`; there is no SELinux policy.
 
 The creators of Urados also offer selected parts of the operating system as open-source software under the name **Urados Open Source Software (UOSS)**. UOSS lets you integrate useful Urados components—such as package management, signing, application sandboxing, policy, and supporting system utilities—into another operating system or existing product without adopting the entire Urados OS. The availability and license of each component are defined by the component’s source repository and license.
 
@@ -10,7 +10,7 @@ It provides two system components and three primary binaries:
 - `urpkg` verifies, installs, and starts signed packages on a device.
 - `uinit` is the native init system. It can run as PID 1 or validate and boot a staged root during development.
 
-At runtime, each app gets its own Unix UID and a folder named after the app. POSIX ACLs isolate writable data and executable cache content between apps. App names are restricted to `[a-z_][a-z0-9_-]*` (at most 32 bytes) so they are safe as both user names and ext4 file and folder names.
+At runtime, each app gets its own Unix UID and a folder named after the app. Mode bits and UID-owned data homes isolate each app's runtime and persistent data by default. App names are restricted to `[a-z_][a-z0-9_-]*` (at most 32 bytes) so they are safe as both user names and ext4 file and folder names.
 
 ![Urados package-manager lifecycle](docs/images/flow.png)
 
@@ -33,11 +33,11 @@ UOSS is intended to make collaboration and integration practical: adopters can u
 1. A publisher creates an app directory containing `manifest.xml` and an `app/` payload.
 2. `urdev pack` hashes the package contents and creates an APK/JAR-style SHA-256 metadata set: `META-INF/MANIFEST.MF`, `META-INF/CERT.SF`, and `META-INF/CERT.SIG`. The package also carries the publisher leaf certificate and any intermediate certificates in `SIGNER_CERTS.pem`.
 3. A device administrator installs only public, self-signed CA roots as `.crt` files in `/etc/urados/keys/`.
-4. `urpkg install` accepts a local path or HTTP(S) URL, verifies the certificate chain and package metadata, stores the verified archive as a root-owned `0600` file, creates the app account and protected directories, and extracts the initial package code.
-5. `urpkg start` takes the per-app lock, verifies the root-owned archive through a pinned file descriptor, extracts a fresh package-code tree, atomically publishes it, and launches the manifest entry.
-6. The launch runs in a forked child that drops to the app UID/GID, makes root unrecoverable, sets `no_new_privs`, enters the app data home, and clears the inherited environment before exec.
+4. `urpkg install` accepts a local path or HTTP(S) URL, verifies the certificate chain and package metadata, stores the verified archive as a root-owned `0600` file, creates the app account, and creates its UID-owned private data home.
+5. `urpkg start` takes the per-app lock, verifies the root-owned archive through a pinned file descriptor, extracts a fresh payload into `/run/app/<name>`, atomically publishes it, and launches the mapped manifest entry.
+6. The launch runs in a forked child that drops to the app UID/GID, makes root unrecoverable, sets `no_new_privs`, enters the persistent app data home, and clears the inherited environment before exec.
 
-A failed verification or extraction does not replace the previous complete package-code tree. The trusted archive, not the mutable cache, is the source of truth for package verification.
+A failed verification or extraction does not replace the previous complete runtime tree. The trusted archive is the source of truth for package verification.
 
 ## Repository layout
 
@@ -51,7 +51,7 @@ A failed verification or extraction does not replace the previous complete packa
 | `init/tests/` | Uinit parser, staged boot, identity, mount, and PID 1 tests. |
 | `init/examples/` | Example identity file and unit tree for `make -C init check-example`. |
 | `ipc/setup-ipc-user.sh` | Creates the optional group-owned IPC runtime directory. |
-| `docs/APP-SANDBOX.md` | Detailed filesystem, ACL, process, and migration model. |
+| `docs/APP-SANDBOX.md` | Detailed filesystem, permission, process, and migration model. |
 | `docs/CODE-SIGNING.md` | Publisher, CA operator, and device administrator signing workflow. |
 | `docs/BUILD.md` | Dependencies, build modes, tests, installation, and static Uinit linking. |
 | `docs/PACKAGE-MANAGER.md` | `urdev` and `urpkg` workflow, commands, package format, and trust setup. |
@@ -93,7 +93,7 @@ Create a project skeleton:
 urdev init ./my-app my-app 1.0.0
 ```
 
-Put the application entry point and other payload files under `./my-app/app/`. The generated manifest points at `system_cache/app/<entry>` after installation. Validate the project before packaging:
+Put the application entry point and other payload files under `./my-app/app/`. The generated manifest uses the compatibility prefix `system_cache/app/<entry>`, which `urpkg start` maps to `/run/app/<name>/<entry>`. Validate the project before packaging:
 
 ```sh
 urdev check ./my-app
@@ -137,7 +137,7 @@ sudo urpkg install my-app-1.0.0.zip
 sudo urpkg start my-app -- hello world
 ```
 
-`start` refreshes the immutable package-code directory from the root-owned signed archive before launching. App-created files under `system_cache/user` remain mutable across starts, while ordinary app data is stored under `/data/app/<name>/data` and is not executable by the app domain.
+`install` stores the signed archive and creates the app's data home. Each `start` verifies the archive and freshly extracts its payload into volatile `/run/app/<name>` before executing it. Persistent app data is stored under `/data/app/<name>/data`; `system_cache/app/` remains the logical manifest entry prefix for package compatibility but is mapped to the runtime payload root.
 
 For staged testing without touching the host’s `/data` or account files, use the `--root DIR` option. This mode is intentionally not a production security boundary.
 
@@ -147,13 +147,13 @@ The main boundaries are:
 
 - **Package authenticity:** certificate chain validation, code-signing EKU and key usage checks, publisher signature verification, and SHA-256 metadata verification for every package file.
 - **Trusted storage:** installed archives live at `/data/app_progs/<name>.zip`, owned by `root:root` with mode `0600`; per-app locks serialize installation and start operations.
-- **Filesystem isolation:** each app has a distinct Unix UID but uses the shared `users` primary group. Root-owned parents and per-UID ACLs prevent one app from reading or modifying another app’s data or cache.
+- **Filesystem isolation:** each app has a distinct Unix UID but uses the shared `users` primary group. App-owned `0700` data homes and app-UID-owned `0570` runtime trees (GID 0) prevent other apps from accessing either by default.
 - **Process confinement:** the app process runs with exactly its own UID and the `users` group, cannot regain root, and has `no_new_privs` set so setuid binaries cannot raise its privilege.
 - **Name safety:** app names are limited to `[a-z_][a-z0-9_-]*`, so they cannot contain path separators, dots, or other characters unsafe in a file name.
 
-Known limit: without SELinux, an app can write a program into its own `data/` folder and run it, and interpreted scripts are not restricted. See [`docs/APP-SANDBOX.md`](docs/APP-SANDBOX.md) for what UNIX permissions do not stop.
+Known limits: because the app UID owns its runtime tree and data home, it can change their permissions or modify its own runtime after launch. Every successful `start` verifies and freshly extracts the trusted package before execution, but the tree is not immutable to its owner. An app can also execute programs from its data home unless the filesystem is separately mounted `noexec`, and interpreted scripts remain unrestricted. See [`docs/APP-SANDBOX.md`](docs/APP-SANDBOX.md) for the permission model and its limits.
 
-The design deliberately supports mutable app-created code in `system_cache/user`. Package verification protects the signed archive; it does not treat that mutable cache as trusted package content. Interpreted shell scripts remain a separate consideration: a trusted shell can interpret a readable script even when the kernel would deny direct execution of that script file.
+The signed archive is the source of truth; package code is freshly verified and extracted for every start. The `system_cache/app/` manifest prefix is retained as a compatibility convention, not a persistent directory. Interpreted shell scripts remain a separate consideration: a trusted shell can interpret a readable script even when the kernel would deny direct execution of that script file.
 
 ## Tests
 
@@ -163,9 +163,9 @@ Build and run the package-manager certificate and staged end-to-end suites with:
 make test
 ```
 
-The end-to-end suite additionally needs passwordless `sudo` and ACL utilities such as `getfacl`. It stages its account and filesystem changes under `pkg_mgr/build/test/root`, so no real account or `/data` path is touched.
+The end-to-end suite additionally needs passwordless `sudo` and standard filesystem tools. It stages its account and filesystem changes under `pkg_mgr/build/test/root`, so no real account or `/data` path is touched.
 
-Passing staged tests does not prove the layout on a device. On the target, verify that each app runs as its own UID, and that one app cannot read or write another app’s data or cache.
+Passing staged tests does not prove the layout on a device. On the target, verify that each app runs as its own UID and that one app cannot read or write another app's runtime or data by default.
 
 Run the Uinit parser, staged boot, identity, mount, and PID 1 tests with:
 

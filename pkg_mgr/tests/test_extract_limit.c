@@ -39,7 +39,7 @@ int main(int argc, char **argv)
         pkg_verified_free(&v);
         return 2;
     }
-    if (pkg_extract(argv[1], appfd, getgid(), &v, err, sizeof(err)) != 0 &&
+    if (pkg_extract(argv[1], appfd, getuid(), getgid(), &v, err, sizeof(err)) != 0 &&
         strstr(err, "configured size limit"))
         rc = 0;
     else if (err[0])

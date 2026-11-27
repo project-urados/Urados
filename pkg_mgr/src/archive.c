@@ -391,12 +391,12 @@ int pkg_verify(const char *zip_path, const char *keys_dir, pkg_verified *v,
 }
 
 /*
- * Extracts every app/ payload into the writable system_cache/app code tree.
- * Root owns installed files; inherited POSIX ACLs grant read/write/execute only
- * to the owning app UID while the global users group has no access. Every byte
- * is re-hashed against the signed digest as it is written.
+ * Extracts every app/ payload into a fresh /run/app/<name> runtime tree.
+ * Files are app-UID:root mode 0570: the app owner can read/execute while root's
+ * group can read/write/execute. Every byte is re-hashed against the signed
+ * digest as it is written.
  */
-int pkg_extract(const char *zip_path, int appfd, gid_t gid, const pkg_verified *v,
+int pkg_extract(const char *zip_path, int appfd, uid_t uid, gid_t gid, const pkg_verified *v,
                 char *err, size_t errlen)
 {
     zip_t *z;
@@ -458,7 +458,7 @@ int pkg_extract(const char *zip_path, int appfd, gid_t gid, const pkg_verified *
             if (!next)
                 break; /* tok is the final file name */
             {
-                int nfd = pkg_open_subdir(cur, tok, 02770, 0, gid);
+                int nfd = pkg_open_subdir(cur, tok, 0570, uid, gid);
 
                 close(cur);
                 if (nfd < 0) {
@@ -470,8 +470,8 @@ int pkg_extract(const char *zip_path, int appfd, gid_t gid, const pkg_verified *
             }
             tok = next;
         }
-        /* Code is mutable and executable by this app only, through its UID ACL. */
-        fmode = 0770;
+        /* App-owner read/execute; group 0 root has full access. */
+        fmode = 0570;
 
         ffd = openat(cur, tok, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
         close(cur);
@@ -524,7 +524,7 @@ int pkg_extract(const char *zip_path, int appfd, gid_t gid, const pkg_verified *
             close(ffd);
             goto out;
         }
-        if (fchown(ffd, 0, gid) != 0 || fchmod(ffd, fmode) != 0 || fsync(ffd) != 0) {
+        if (fchown(ffd, uid, gid) != 0 || fchmod(ffd, fmode) != 0 || fsync(ffd) != 0) {
             pkg_seterr(err, errlen, "cannot set attributes on '%s': %s", d->name, strerror(errno));
             close(ffd);
             goto out;

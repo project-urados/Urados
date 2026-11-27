@@ -9,12 +9,10 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <grp.h>
-#include <acl/libacl.h>
 #include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/acl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -22,49 +20,6 @@
 #include "urados_pkg.h"
 
 #define RM_MAX_DEPTH 64
-
-/*
- * App data/cache directories are root-owned and belong to the shared 'users'
- * group. The owning group ACL is deliberately empty; a named-user ACL grants
- * access to just this app UID. Default entries carry the same isolation to
- * descendants. app_read=0 is the top-level system_cache contract (app WX only);
- * app_read=1 gives the app RWX for its data home or code subdirectories.
- */
-int pkg_set_app_uid_acl(int fd, uid_t app_uid, int app_read)
-{
-    char access_text[160], default_text[160], procfd[64];
-    const char *app_perms = app_read ? "rwx" : "-wx";
-    acl_t access_acl = NULL, default_acl = NULL;
-    int rc = -1;
-
-    if (snprintf(access_text, sizeof(access_text),
-                 "u::rwx,u:%lu:%s,g::---,m::%s,o::---",
-                 (unsigned long)app_uid, app_perms, app_perms) >= (int)sizeof(access_text) ||
-        snprintf(default_text, sizeof(default_text),
-                 "u::rwx,u:%lu:rwx,g::---,m::rwx,o::---",
-                 (unsigned long)app_uid) >= (int)sizeof(default_text)) {
-        errno = EOVERFLOW;
-        return -1;
-    }
-    access_acl = acl_from_text(access_text);
-    default_acl = acl_from_text(default_text);
-    if (!access_acl || !default_acl || acl_valid(access_acl) != 0 ||
-        acl_valid(default_acl) != 0 || acl_set_fd(fd, access_acl) != 0)
-        goto out;
-    if (snprintf(procfd, sizeof(procfd), "/proc/self/fd/%d", fd) >= (int)sizeof(procfd)) {
-        errno = EOVERFLOW;
-        goto out;
-    }
-    if (acl_set_file(procfd, ACL_TYPE_DEFAULT, default_acl) != 0)
-        goto out;
-    rc = 0;
-out:
-    if (access_acl)
-        acl_free(access_acl);
-    if (default_acl)
-        acl_free(default_acl);
-    return rc;
-}
 
 int pkg_run(char *const argv[])
 {
@@ -74,7 +29,13 @@ int pkg_run(char *const argv[])
     if (pid < 0)
         return -1;
     if (pid == 0) {
-        execv(argv[0], argv);
+        if (strchr(argv[0], '/') != NULL) {
+            execv(argv[0], argv);
+        } else {
+            /* Bare names are only used for staged host account tools. */
+            setenv("PATH", "/sbin:/bin", 1);
+            execvp(argv[0], argv);
+        }
         _exit(127);
     }
     while (waitpid(pid, &status, 0) < 0) {

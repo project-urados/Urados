@@ -111,8 +111,9 @@ int pkg_path_safe(const char *p)
 }
 
 /*
- * A manifest <entry> must be under system_cache/app/. Writes the matching
- * zip name ("app/<rest>") to out. Returns 0 on success.
+ * A manifest <entry> must use the compatibility prefix system_cache/app/.
+ * Writes the matching ZIP name ("app/<rest>") to out; start later maps the
+ * payload root to /run/app/<name>. Returns 0 on success.
  */
 int pkg_entry_zipname(const char *entry, char *out, size_t outlen)
 {
