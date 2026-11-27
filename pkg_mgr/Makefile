@@ -43,10 +43,14 @@ $(BUILD)/urpkg_small_limit: check-deps $(COMMON) src/install.c src/urpkg_main.c 
 $(BUILD)/test_extract_limit: check-deps $(COMMON) tests/test_extract_limit.c $(HDRS) | $(BUILD)
 	$(CC) $(CFLAGS) -DPKG_UNPACKED_MAX=65536 -o $@ $(COMMON) tests/test_extract_limit.c $(LDLIBS)
 
+$(BUILD)/test_account_lookup: check-deps $(COMMON) tests/test_account_lookup.c $(HDRS) | $(BUILD)
+	$(CC) $(CFLAGS) -o $@ $(COMMON) tests/test_account_lookup.c $(LDLIBS)
+
 $(BUILD):
 	mkdir -p $@
 
-test: all $(BUILD)/urpkg_small_limit $(BUILD)/test_extract_limit
+test: all $(BUILD)/urpkg_small_limit $(BUILD)/test_extract_limit $(BUILD)/test_account_lookup
+	$(BUILD)/test_account_lookup
 	sh tests/test_cert.sh
 	sh tests/test_e2e.sh
 

@@ -71,6 +71,7 @@ printf 'root:x:0:\nusers:x:100:\nextras:x:101:notes\n' | sudo -n tee "$ROOT/etc/
 printf 'root:!:19000:0:99999:7:::\n' | sudo -n tee "$ROOT/etc/shadow" >/dev/null
 printf 'root:!::\nusers:!::\nextras:!::\n' | sudo -n tee "$ROOT/etc/gshadow" >/dev/null
 sudo -n chmod 600 "$ROOT/etc/shadow" "$ROOT/etc/gshadow"
+USERS_GID=$(awk -F: '$1=="users"{print $3}' "$ROOT/etc/group")
 sudo -n cp "$T/root.crt" "$ROOT/etc/urados/keys/test-root.crt"
 
 
@@ -133,27 +134,25 @@ expect_fail "urdev init refuses a name longer than 32 bytes" \
 rm -rf "$T/badname"
 expect_ok "install a signed package" sudo -n "$URPKG" --root "$ROOT" install "$T/notes-1.0.0.zip"
 expect_fail "reinstalling the same package is refused" sudo -n "$URPKG" --root "$ROOT" install "$T/notes-1.0.0.zip"
-
 expect_eq "app user exists" "1" "$(sudo -n grep -c '^notes:' "$ROOT/etc/passwd")"
-expect_eq "app user's primary group is users (gid 100)" "100" "$(awk -F: '$1=="notes"{print $4}' "$ROOT/etc/passwd")"
-expect_eq "app uses the global users primary group only" "100" "$(awk -F: '$1=="notes"{print $4}' "$ROOT/etc/passwd")"
+expect_eq "app user's primary group matches the staged users group" "$USERS_GID" "$(awk -F: '$1=="notes"{print $4}' "$ROOT/etc/passwd")"
+expect_eq "app uses the global users primary group only" "$USERS_GID" "$(awk -F: '$1=="notes"{print $4}' "$ROOT/etc/passwd")"
 NOTES_UID=$(awk -F: '$1=="notes"{print $3}' "$ROOT/etc/passwd")
-USERS_GID=$(sudo -n awk -F: '$1=="users"{print $3}' "$ROOT/etc/group")
 expect_eq "no per-app Unix group is created" "0" "$(sudo -n grep -c '^notes:' "$ROOT/etc/group" || true)"
 expect_eq "trusted copy is root:root 0600" "0:0 600" "$(stat_of "$ROOT/data/app_progs/notes.zip")"
 expect_eq "app_progs is root:root 0700" "0:0 700" "$(stat_of "$ROOT/data/app_progs")"
 expect_eq "per-app lock is root:root 0600" "0:0 600" "$(stat_of "$ROOT/data/app_progs/.locks/app-notes.lock")"
 expect_eq "app parent is root:users 0710" "0:$USERS_GID 710" "$(stat_of "$ROOT/data/app/notes")"
 expect_eq "ordinary app data home is root:users 0770" "0:$USERS_GID 770" "$(stat_of "$ROOT/data/app/notes/data")"
-expect_eq "data home ACL grants RWX only to its app UID" "1" "$(sudo -n getfacl -cp "$ROOT/data/app/notes/data" | grep -Fxc "user:$NOTES_UID:rwx")"
-expect_eq "data home shared-group ACL grants no access" "1" "$(sudo -n getfacl -cp "$ROOT/data/app/notes/data" | grep -Fxc 'group::---')"
-expect_eq "data files inherit the owning app UID ACL" "1" "$(sudo -n getfacl -cp "$ROOT/data/app/notes/data" | grep -Fxc "default:user:$NOTES_UID:rwx")"
-expect_eq "data files inherit no shared-group access" "1" "$(sudo -n getfacl -cp "$ROOT/data/app/notes/data" | grep -Fxc 'default:group::---')"
+expect_eq "data home ACL grants RWX only to its app UID" "1" "$(sudo -n getfacl -ncp "$ROOT/data/app/notes/data" | grep -Fxc "user:$NOTES_UID:rwx")"
+expect_eq "data home shared-group ACL grants no access" "1" "$(sudo -n getfacl -ncp "$ROOT/data/app/notes/data" | grep -Fxc 'group::---')"
+expect_eq "data files inherit the owning app UID ACL" "1" "$(sudo -n getfacl -ncp "$ROOT/data/app/notes/data" | grep -Fxc "default:user:$NOTES_UID:rwx")"
+expect_eq "data files inherit no shared-group access" "1" "$(sudo -n getfacl -ncp "$ROOT/data/app/notes/data" | grep -Fxc 'default:group::---')"
 expect_eq "system_cache is root:users setgid 2730" "0:$USERS_GID 2730" "$(stat_of "$ROOT/data/app/notes/system_cache")"
-expect_eq "system_cache grants only this app UID WX" "1" "$(sudo -n getfacl -cp "$ROOT/data/app/notes/system_cache" | grep -Fxc "user:$NOTES_UID:-wx")"
-expect_eq "system_cache group ACL grants no access" "1" "$(sudo -n getfacl -cp "$ROOT/data/app/notes/system_cache" | grep -Fxc 'group::---')"
+expect_eq "system_cache grants only this app UID WX" "1" "$(sudo -n getfacl -ncp "$ROOT/data/app/notes/system_cache" | grep -Fxc "user:$NOTES_UID:-wx")"
+expect_eq "system_cache group ACL grants no access" "1" "$(sudo -n getfacl -ncp "$ROOT/data/app/notes/system_cache" | grep -Fxc 'group::---')"
 expect_eq "package code folder is root:users setgid 2770" "0:$USERS_GID 2770" "$(stat_of "$ROOT/data/app/notes/system_cache/app")"
-expect_eq "package code ACL grants this app RWX" "1" "$(sudo -n getfacl -cp "$ROOT/data/app/notes/system_cache/app" | grep -Fxc "user:$NOTES_UID:rwx")"
+expect_eq "package code ACL grants this app RWX" "1" "$(sudo -n getfacl -ncp "$ROOT/data/app/notes/system_cache/app" | grep -Fxc "user:$NOTES_UID:rwx")"
 expect_eq "generated-code folder is root:users setgid 2770" "0:$USERS_GID 2770" "$(stat_of "$ROOT/data/app/notes/system_cache/user")"
 expect_eq "staging area is empty after install" "0" "$(sudo -n ls -A "$ROOT/data/app_progs/.staging" | wc -l)"
 
@@ -183,7 +182,7 @@ set -e
 cat "$T/run.log" | sed 's/^/          /'
 expect_eq "start returns the entry point's exit status" "0" "$RC"
 expect_eq "entry runs as the app user" "1" "$(grep -c "^uid=$APP_UID " "$T/run.log")"
-expect_eq "app gets only the shared users group, not extra memberships" "1" "$(grep -c '^groups=100$' "$T/run.log")"
+expect_eq "entry gets only the shared users group, not extra memberships" "1" "$(grep -c "^groups=$USERS_GID$" "$T/run.log")"
 expect_eq "entry receives its arguments" "2" "$(grep -c '^arg=' "$T/run.log")"
 expect_eq "entry can write its mutable system_cache" "1" "$(grep -c '^cache_write=ok' "$T/run.log")"
 expect_eq "entry cannot list the top-level system_cache" "1" "$(grep -c '^cache_list=denied' "$T/run.log")"
@@ -195,13 +194,13 @@ expect_eq "entry runs with no_new_privs set" "1" "$(grep -c '^no_new_privs=1$' "
 expect_eq "entry can write its own data" "1" "$(grep -c '^data_write=ok' "$T/run.log")"
 expect_eq "probe reports PASS" "1" "$(grep -c '^probe=PASS' "$T/run.log")"
 expect_eq "data file is owned by the app user" "$NOTES_UID" "$(sudo -n stat -c '%u' "$ROOT/data/app/notes/data/probe-data.txt")"
-expect_eq "app-created data file has no shared-group ACL permissions" "1" "$(sudo -n getfacl -cp "$ROOT/data/app/notes/data/probe-data.txt" | grep -Fxc 'group::---')"
+expect_eq "app-created data file has no shared-group ACL permissions" "1" "$(sudo -n getfacl -ncp "$ROOT/data/app/notes/data/probe-data.txt" | grep -Fxc 'group::---')"
 expect_fail "app cannot chmod its root-owned data home" sudo -n "$URPKG" --root "$ROOT" start notes --op chmod /data/app/notes/data
 expect_eq "the chmod failure is due to protected data-home ownership" "1" "$(grep -c 'chmod /data/app/notes/data: denied' "$T/last.log")"
 expect_eq "installed program is root:users 0770" "0:$USERS_GID 770" "$(stat_of "$ROOT/data/app/notes/system_cache/app/notes")"
-expect_eq "installed program ACL grants only this app UID" "1" "$(sudo -n getfacl -cp "$ROOT/data/app/notes/system_cache/app/notes" | grep -Fxc "user:$NOTES_UID:rwx")"
+expect_eq "installed program ACL grants only this app UID" "1" "$(sudo -n getfacl -ncp "$ROOT/data/app/notes/system_cache/app/notes" | grep -Fxc "user:$NOTES_UID:rwx")"
 expect_eq "app-created executable is owned by its app UID" "$NOTES_UID" "$(sudo -n stat -c '%u' "$ROOT/data/app/notes/system_cache/user/generated-probe")"
-expect_eq "app-created executable has no shared-group ACL permissions" "1" "$(sudo -n getfacl -cp "$ROOT/data/app/notes/system_cache/user/generated-probe" | grep -Fxc 'group::---')"
+expect_eq "app-created executable has no shared-group ACL permissions" "1" "$(sudo -n getfacl -ncp "$ROOT/data/app/notes/system_cache/user/generated-probe" | grep -Fxc 'group::---')"
 sudo -n touch "$ROOT/data/app/notes/system_cache/root-write-check"
 expect_eq "root can create entries in the cache" "0:$USERS_GID 660" "$(stat_of "$ROOT/data/app/notes/system_cache/root-write-check")"
 sudo -n rm -f "$ROOT/data/app/notes/system_cache/root-write-check"

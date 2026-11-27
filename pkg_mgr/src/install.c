@@ -38,7 +38,6 @@
 #define CACHE_MODE     02730 /* root:users; ACL gives owning app WX, root RWX */
 #define CODE_MODE      02770 /* root:users; ACL gives owning app RWX */
 #define CODE_DIR       "app"
-#define APP_UID_MIN    10000 /* app uids below this could collide with real logins */
 #define LOCKS_DIR      ".locks"
 
 static void msg_err(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
@@ -264,9 +263,8 @@ static int account_exists(const pkg_opts *o, const char *name)
 /* Creates exactly one app account with the shared global primary group. */
 static int create_account(const pkg_opts *o, const char *name, const char *home)
 {
-    /* App ids come from 10000+ so they never collide with real logins. */
-    const char *u[] = { "-K", "UID_MIN=10000", "-K", "UID_MAX=59999",
-                        "-M", "-N", "-d", home, "-s", "/usr/sbin/nologin",
+    /* Let useradd apply the target system's configured UID allocation policy. */
+    const char *u[] = { "-M", "-N", "-d", home, "-s", "/usr/sbin/nologin",
                         "-g", PKG_APP_GROUP, name };
 
     if (run_acct(o, "/usr/sbin/useradd", u, sizeof(u) / sizeof(u[0])) != 0) {
@@ -426,11 +424,6 @@ int pkg_cmd_install(const char *source, const pkg_opts *o)
     acct_made = 1;
     if (pkg_lookup_passwd(o->root, name, &uid, &pgid) != 0 || pgid != usersgid) {
         msg_err("new user '%s' does not have primary group '%s'", name, PKG_APP_GROUP);
-        goto out;
-    }
-    if (uid < APP_UID_MIN) {
-        msg_err("app user '%s' got uid %u, below %d; set UID_MIN in login.defs",
-                name, (unsigned)uid, APP_UID_MIN);
         goto out;
     }
     /* 3. Protect the app parent so the app cannot replace system_cache. */

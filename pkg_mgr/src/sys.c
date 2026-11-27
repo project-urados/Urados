@@ -8,7 +8,9 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <grp.h>
 #include <acl/libacl.h>
+#include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -147,9 +149,40 @@ int pkg_open_subdir(int base, const char *name, mode_t mode, uid_t uid, gid_t gi
     return openat(base, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
 }
 
-/* Looks up a passwd entry in <root>/etc/passwd. Returns 0 if found. */
+/* Looks up a passwd entry through libc/NSS, or in a staged root's passwd file. */
 int pkg_lookup_passwd(const char *root, const char *name, uid_t *uid, gid_t *gid)
 {
+    if (!root || !root[0]) {
+        struct passwd pw, *result = NULL;
+        long hint = sysconf(_SC_GETPW_R_SIZE_MAX);
+        size_t size = hint > 0 ? (size_t)hint : 1024;
+        char *buf;
+        int rc;
+
+        if (size < 1024)
+            size = 1024;
+        for (;;) {
+            buf = malloc(size);
+            if (!buf)
+                return -1;
+            rc = getpwnam_r(name, &pw, buf, size, &result);
+            if (rc != ERANGE)
+                break;
+            free(buf);
+            if (size > (size_t)-1 / 2)
+                return -1;
+            size *= 2;
+        }
+        if (rc == 0 && result) {
+            *uid = result->pw_uid;
+            *gid = result->pw_gid;
+            free(buf);
+            return 0;
+        }
+        free(buf);
+        return -1;
+    }
+
     char *path = pkg_join(root, "/etc/passwd");
     FILE *fp;
     char line[1024];
@@ -183,9 +216,39 @@ int pkg_lookup_passwd(const char *root, const char *name, uid_t *uid, gid_t *gid
     return found;
 }
 
-/* Looks up a group entry in <root>/etc/group. Returns 0 if found. */
+/* Looks up a group through libc/NSS, or in a staged root's group file. */
 int pkg_lookup_group(const char *root, const char *name, gid_t *gid)
 {
+    if (!root || !root[0]) {
+        struct group gr, *result = NULL;
+        long hint = sysconf(_SC_GETGR_R_SIZE_MAX);
+        size_t size = hint > 0 ? (size_t)hint : 1024;
+        char *buf;
+        int rc;
+
+        if (size < 1024)
+            size = 1024;
+        for (;;) {
+            buf = malloc(size);
+            if (!buf)
+                return -1;
+            rc = getgrnam_r(name, &gr, buf, size, &result);
+            if (rc != ERANGE)
+                break;
+            free(buf);
+            if (size > (size_t)-1 / 2)
+                return -1;
+            size *= 2;
+        }
+        if (rc == 0 && result) {
+            *gid = result->gr_gid;
+            free(buf);
+            return 0;
+        }
+        free(buf);
+        return -1;
+    }
+
     char *path = pkg_join(root, "/etc/group");
     FILE *fp;
     char line[1024];

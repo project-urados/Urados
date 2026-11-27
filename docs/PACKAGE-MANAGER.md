@@ -150,6 +150,8 @@ urpkg [--root DIR] [--keys DIR] start <name> [args...]
 
 `--keys DIR` selects the administrator trust directory. By default it is `<root>/etc/urados/keys`. `--root DIR` prefixes device paths and is intended for staged development and tests; it is not a security boundary.
 
+On the device (without `--root`), `urpkg` resolves existing users and groups through libc's reentrant account APIs, so configured NSS sources are honored rather than assuming `/etc/passwd` and `/etc/group` are the only providers. Staged `--root` runs read those files from the staging tree because libc cannot query a separate staged account database. Account creation delegates UID allocation to the system's `useradd` policy instead of imposing a package-manager UID range.
+
 ## On-device storage
 
 After installation, the trusted archive is stored at:
