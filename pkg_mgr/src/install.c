@@ -38,6 +38,7 @@
 #define CACHE_MODE     02730 /* root:users; ACL gives owning app WX, root RWX */
 #define CODE_MODE      02770 /* root:users; ACL gives owning app RWX */
 #define CODE_DIR       "app"
+#define PKG_BUSYBOX    "/bin/busybox"
 #define LOCKS_DIR      ".locks"
 
 static void msg_err(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
@@ -233,8 +234,9 @@ static int publish_code_staging_dir(int cache_fd, const char *staging_name)
     return 0;
 }
 
-/* Runs a shadow-utils tool against the root prefix (-R when root is set). */
-static int run_acct(const pkg_opts *o, const char *tool, const char *const *args, size_t nargs)
+/* Runs a shadow-utils tool against an explicit staging root for tests only. */
+static int run_stage_acct(const pkg_opts *o, const char *tool,
+                          const char *const *args, size_t nargs)
 {
     char *argv[PKG_ARGS_MAX];
     size_t n = 0, i;
@@ -246,6 +248,25 @@ static int run_acct(const pkg_opts *o, const char *tool, const char *const *args
         argv[n++] = (char *)o->root;
     }
     for (i = 0; i < nargs && n < PKG_ARGS_MAX - 1; i++)
+        argv[n++] = (char *)args[i];
+    argv[n] = NULL;
+    return pkg_run(argv);
+}
+
+/* Runs a BusyBox account applet on the live device. */
+static int run_busybox_acct(const char *applet,
+                            const char *const *args, size_t nargs)
+{
+    char *argv[PKG_ARGS_MAX];
+    size_t n = 0, i;
+
+    if (nargs > PKG_ARGS_MAX - 3) {
+        errno = E2BIG;
+        return -1;
+    }
+    argv[n++] = PKG_BUSYBOX;
+    argv[n++] = (char *)applet;
+    for (i = 0; i < nargs; i++)
         argv[n++] = (char *)args[i];
     argv[n] = NULL;
     return pkg_run(argv);
@@ -263,13 +284,28 @@ static int account_exists(const pkg_opts *o, const char *name)
 /* Creates exactly one app account with the shared global primary group. */
 static int create_account(const pkg_opts *o, const char *name, const char *home)
 {
-    /* Let useradd apply the target system's configured UID allocation policy. */
-    const char *u[] = { "-M", "-N", "-d", home, "-s", "/usr/sbin/nologin",
-                        "-g", PKG_APP_GROUP, name };
+    if (o->root[0] != '\0') {
+        /* Staged test roots use host shadow-utils because BusyBox has no prefix mode. */
+        const char *u[] = { "-M", "-N", "-d", home, "-s", "/usr/sbin/nologin",
+                            "-g", PKG_APP_GROUP, name };
 
-    if (run_acct(o, "/usr/sbin/useradd", u, sizeof(u) / sizeof(u[0])) != 0) {
-        msg_err("useradd %s failed", name);
-        return -1;
+        if (run_stage_acct(o, "/usr/sbin/useradd", u,
+                           sizeof(u) / sizeof(u[0])) != 0) {
+            msg_err("staged useradd %s failed", name);
+            return -1;
+        }
+        return 0;
+    }
+
+    /* BusyBox uses -G for the primary group and -h/-s for passwd fields. */
+    {
+        const char *u[] = { "-D", "-H", "-h", home, "-s", "/usr/sbin/nologin",
+                            "-G", PKG_APP_GROUP, name };
+
+        if (run_busybox_acct("adduser", u, sizeof(u) / sizeof(u[0])) != 0) {
+            msg_err("BusyBox adduser %s failed", name);
+            return -1;
+        }
     }
     return 0;
 }
@@ -278,7 +314,11 @@ static void remove_account(const pkg_opts *o, const char *name)
 {
     const char *a[] = { name };
 
-    run_acct(o, "/usr/sbin/userdel", a, 1);
+    if (o->root[0] != '\0') {
+        run_stage_acct(o, "/usr/sbin/userdel", a, 1);
+    } else if (run_busybox_acct("deluser", a, 1) != 0) {
+        msg_err("BusyBox deluser %s failed during install rollback", name);
+    }
 }
 
 int pkg_cmd_verify(const char *zip, const pkg_opts *o)

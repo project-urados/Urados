@@ -150,7 +150,7 @@ urpkg [--root DIR] [--keys DIR] start <name> [args...]
 
 `--keys DIR` selects the administrator trust directory. By default it is `<root>/etc/urados/keys`. `--root DIR` prefixes device paths and is intended for staged development and tests; it is not a security boundary.
 
-On the device (without `--root`), `urpkg` resolves existing users and groups through libc's reentrant account APIs, so configured NSS sources are honored rather than assuming `/etc/passwd` and `/etc/group` are the only providers. Staged `--root` runs read those files from the staging tree because libc cannot query a separate staged account database. Account creation delegates UID allocation to the system's `useradd` policy instead of imposing a package-manager UID range.
+On the device (without `--root`), `urpkg` resolves existing users and groups through libc's reentrant account APIs, so configured NSS sources are honored rather than assuming `/etc/passwd` and `/etc/group` are the only providers. It invokes BusyBox `adduser` with BusyBox-compatible options and uses `deluser` for rollback. Staged `--root` runs read account records from the staging tree and use host shadow-utils with a prefix, because BusyBox applets do not support operating on a separate staged root. UID allocation is left to the system account utility rather than a package-manager UID range.
 
 ## On-device storage
 
