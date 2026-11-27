@@ -88,7 +88,9 @@ static int open_owned_at(int base, const char *name, uid_t owner)
     return fd;
 }
 
-/* Opens <root>/data as root:root DATA_ROOT_MODE, creating it if it is missing. */
+/* Opens <root>/data, creating it as root:root DATA_ROOT_MODE if it is missing.
+ * Existing mounts keep their group/mode but must be root-owned and not writable
+ * by group or others. */
 static int open_data_root(const pkg_opts *o)
 {
     char p[PKG_PATH_MAX];
@@ -108,8 +110,11 @@ static int open_data_root(const pkg_opts *o)
     }
     if (fd < 0)
         return -1;
-    if (fstat(fd, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != 0 ||
-        st.st_gid != 0 || fchmod(fd, DATA_ROOT_MODE) != 0) {
+    if (fstat(fd, &st) != 0) {
+        close(fd);
+        return -1;
+    }
+    if (!S_ISDIR(st.st_mode) || st.st_uid != 0 || (st.st_mode & 0022) != 0) {
         close(fd);
         errno = EPERM;
         return -1;
@@ -645,7 +650,8 @@ int pkg_cmd_start(const char *name, int argc, char **argv, const pkg_opts *o)
     snprintf(archive_name, sizeof(archive_name), "%s%s", name, PKG_ARCHIVE_SUFFIX);
     data_fd = open_data_root(o);
     if (data_fd < 0) {
-        msg_err("cannot open the data directory: %s", strerror(errno));
+        msg_err("cannot open the data directory (must be root-owned and not writable by group/others): %s",
+                strerror(errno));
         goto out;
     }
     progs_fd = open_owned_at(data_fd, "app_progs", 0);

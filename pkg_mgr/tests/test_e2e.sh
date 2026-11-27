@@ -71,6 +71,8 @@ printf 'root:!:19000:0:99999:7:::\n' | sudo -n tee "$ROOT/etc/shadow" >/dev/null
 printf 'root:!::\nusers:!::\nextras:!::\n' | sudo -n tee "$ROOT/etc/gshadow" >/dev/null
 sudo -n chmod 600 "$ROOT/etc/shadow" "$ROOT/etc/gshadow"
 USERS_GID=$(awk -F: '$1=="users"{print $3}' "$ROOT/etc/group")
+sudo -n chown "0:$USERS_GID" "$ROOT/data"
+sudo -n chmod 0755 "$ROOT/data"
 sudo -n cp "$T/root.crt" "$ROOT/etc/urados/keys/test-root.crt"
 
 
@@ -138,7 +140,7 @@ expect_eq "app user's primary group matches the staged users group" "$USERS_GID"
 expect_eq "app uses the global users primary group only" "$USERS_GID" "$(awk -F: '$1=="notes"{print $4}' "$ROOT/etc/passwd")"
 NOTES_UID=$(awk -F: '$1=="notes"{print $3}' "$ROOT/etc/passwd")
 expect_eq "no per-app Unix group is created" "0" "$(sudo -n grep -c '^notes:' "$ROOT/etc/group" || true)"
-expect_eq "data root is root:root 0711" "0:0 711" "$(stat_of "$ROOT/data")"
+expect_eq "existing data root is preserved as root:users 0755" "0:$USERS_GID 755" "$(stat_of "$ROOT/data")"
 expect_eq "trusted copy is root:root 0600" "0:0 600" "$(stat_of "$ROOT/data/app_progs/notes.zip")"
 expect_eq "app_progs is root:root 0700" "0:0 700" "$(stat_of "$ROOT/data/app_progs")"
 expect_eq "per-app lock is root:root 0600" "0:0 600" "$(stat_of "$ROOT/data/app_progs/.locks/app-notes.lock")"

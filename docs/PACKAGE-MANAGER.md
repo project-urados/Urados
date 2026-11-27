@@ -157,7 +157,7 @@ On the device (without `--root`), `urpkg` resolves existing users and groups thr
 After installation, the trusted archive is stored at:
 
 ```text
-/data                       root:root, mode 0711 (traverse-only root)
+/data                       root-owned, not group/other-writable (created as 0711 if absent)
 /data/app_progs/<name>.zip  root:root, mode 0600 (trusted archive)
 /data/app_progs/.locks/     root-only per-app locks
 /data/app/<name>/data/      app-UID:root, mode 0700 (persistent app data)

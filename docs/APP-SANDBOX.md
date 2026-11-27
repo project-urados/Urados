@@ -8,7 +8,7 @@ An app's name is both its Unix user name and its folder and file name on ext4, s
 
 | Path | Owner, group, mode | Purpose |
 | --- | --- | --- |
-| `/data` | `root:root`, `0711` | Root-managed data root; traverse-only, with no directory listing for other users. |
+| `/data` | `root:root`, `0711` if created; safe existing modes preserved | Root-managed data root; must not be group/world writable. |
 | `/data/app_progs` | `root:root`, `0700` | Root-only package store. |
 | `/data/app_progs/.locks` | `root:root`, `0700` | Per-app locks serialize installation and each start's verification, extraction, and launch. |
 | `/data/app_progs/<app>.zip` | `root:root`, `0600` | Trusted signed package archive. |
@@ -18,7 +18,7 @@ An app's name is both its Unix user name and its folder and file name on ext4, s
 | `/run/app` | `root:root`, `0711` | Root-managed parent for volatile runtime trees. |
 | `/run/app/<app>` and payload entries | `<app-UID>:root`, `0570` | Freshly verified runtime payload; app-owner gets `r-x`, GID 0 gets `rwx`, other gets no access. |
 
-App processes have their own UID and exactly the shared `users` group, not GID 0. When the process UID matches a file's owner, Unix permission checks use the owner bits, so the runtime's GID-0 `rwx` group permissions do not give the app write access under the initial `0570` modes. The root-owned `/run/app` parent is not writable by apps, which prevents an app from replacing its top-level runtime entry. The package manager requires `/data` to be root-owned and resets its mode to `0711`, allowing fixed-path traversal without exposing directory listings. Persistent data is stored separately at `/data/app/<app>/data` and is created with no group or other permissions.
+App processes have their own UID and exactly the shared `users` group, not GID 0. When the process UID matches a file's owner, Unix permission checks use the owner bits, so the runtime's GID-0 `rwx` group permissions do not give the app write access under the initial `0570` modes. The root-owned `/run/app` parent is not writable by apps, which prevents an app from replacing its top-level runtime entry. If `/data` is absent, the package manager creates it as root:root mode `0711`; an existing `/data` must be root-owned and not writable by group or others, and its group/mode are preserved so mounted data filesystems are not unexpectedly changed. Persistent data is stored separately at `/data/app/<app>/data` and is created with no group or other permissions.
 
 ## Package lifecycle and process start
 

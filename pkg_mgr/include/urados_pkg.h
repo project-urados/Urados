@@ -22,7 +22,7 @@
  * file invalidates the package.
  *
  * Installed layout (every device path is prefixed by --root when one is given):
- *   /data/                                  root:root 0711   traverse-only data root
+ *   /data/                                  root-owned, not g/o-writable; created 0711
  *   /data/app_progs/                        root:root 0700   root only
  *   /data/app_progs/.locks/                 root:root 0700   install/start serialization
  *   /data/app_progs/.staging/               root:root 0700   install staging
