@@ -76,6 +76,58 @@ int pkg_version_valid(const char *v)
 }
 
 /*
+ * Debian-style version ordering (dpkg's algorithm): digit runs compare as
+ * numbers, other runs by character with '~' sorting before everything,
+ * including the end of the string. Returns <0, 0 or >0 like strcmp.
+ */
+static int version_order(int c)
+{
+    if (is_digit((char)c))
+        return 0;
+    if (is_lower((char)c) || is_upper((char)c))
+        return c;
+    if (c == '~')
+        return -1;
+    if (c != 0)
+        return c + 256;
+    return 0;
+}
+
+int pkg_version_compare(const char *a, const char *b)
+{
+    while (*a || *b) {
+        int first_diff = 0;
+
+        while ((*a && !is_digit(*a)) || (*b && !is_digit(*b))) {
+            int ac = version_order((unsigned char)*a);
+            int bc = version_order((unsigned char)*b);
+
+            if (ac != bc)
+                return ac < bc ? -1 : 1;
+            a++;
+            b++;
+        }
+        while (*a == '0')
+            a++;
+        while (*b == '0')
+            b++;
+        while (is_digit(*a) && is_digit(*b)) {
+            if (!first_diff)
+                first_diff = *a - *b;
+            a++;
+            b++;
+        }
+        if (is_digit(*a))
+            return 1;
+        if (is_digit(*b))
+            return -1;
+        if (first_diff)
+            return first_diff < 0 ? -1 : 1;
+    }
+    return 0;
+}
+
+/*
  * Safe relative path: no leading or trailing '/', no empty, '.' or '..'
  * segment, no backslash, no control characters.
  */

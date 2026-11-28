@@ -48,7 +48,7 @@ expect_ok "urdev creates publisher CSR with full subject" "$B/urdev" csr "$T/pub
     --common-name "Test Publisher" --email publisher@example.test
 expect_ok "publisher CSR self-signature verifies" openssl req -in "$T/publisher.csr" -verify -noout
 expect_ok "publisher CSR contains requested subject" sh -c \
-    "openssl req -in '$T/publisher.csr' -noout -subject | grep -F 'CN = Test Publisher' | grep -F 'O = Urados Test'"
+    "openssl req -in '$T/publisher.csr' -noout -subject -nameopt RFC2253 | grep -F 'CN=Test Publisher' | grep -F 'O=Urados Test'"
 cat > "$T/codesign.ext" <<'EOF'
 basicConstraints=critical,CA:FALSE
 keyUsage=critical,digitalSignature

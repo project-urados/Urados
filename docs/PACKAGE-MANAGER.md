@@ -146,9 +146,22 @@ CSR subject options are `--common-name`, `--country`, `--state`, `--locality`, `
 urpkg [--root DIR] [--keys DIR] verify <package.zip>
 urpkg [--root DIR] [--keys DIR] install <source>
 urpkg [--root DIR] [--keys DIR] start <name> [args...]
+urpkg [--root DIR] [--keys DIR] stop [--force] [--timeout SEC] <name>
+urpkg [--root DIR] [--keys DIR] update [--force] [--timeout SEC] <source>
+urpkg [--root DIR] [--keys DIR] uninstall [--force] [--timeout SEC] <name>
 ```
 
 `--keys DIR` selects the administrator trust directory. By default it is `<root>/etc/urados/keys`. `--root DIR` prefixes device paths and is intended for staged development and tests; it is not a security boundary.
+
+### Stop, update and uninstall
+
+These three commands control an installed app's life cycle after `start`:
+
+- `stop <name>` ends every process the app is running. It sends `SIGTERM` to each process that runs under the app's UID inside the target root, which includes detached children, and sends `SIGKILL` to any that remain after `--timeout SEC` (default 5, range 0-600). `--force` sends `SIGKILL` at once. The command returns once the app's per-app lock is free, so no `start` is still running. Stopping an app that is not running succeeds.
+- `update <source>` replaces an installed app with a newer signed package. `<source>` is a local path or an http(s) URL. The new package is verified before anything is stopped. It must have the same app name, be signed by the same publisher key as the installed version (the SHA-256 of the signer's SubjectPublicKeyInfo, so a renewed certificate for the same key still matches), and have a strictly newer version. Versions compare with Debian-style ordering. Downgrades and re-installing the same version are refused. Once the checks pass, the app is stopped under the per-app lock, the trusted archive is replaced atomically, and the old runtime tree is removed. The account, private data and lock are kept. The next `start` extracts the new package.
+- `uninstall <name>` stops the app and removes its account, runtime tree, trusted package, private data home and lock file, in that order. The account goes first so the app cannot run again during removal. Running `uninstall` again after an interruption finishes the removal, and removing an app that is not installed fails.
+
+Both `stop` and `uninstall` signal only processes whose real UID belongs to the app account and that live inside the target root. They never signal root's processes. `update` and `uninstall` take the same per-app lock as `start` and `install`, so they never run alongside a start.
 
 On the device (without `--root`), `urpkg` resolves existing users and groups through libc's reentrant account APIs, so configured NSS sources are honored rather than assuming `/etc/passwd` and `/etc/group` are the only providers. It invokes BusyBox `adduser` with BusyBox-compatible options and uses `deluser` for rollback. Staged `--root` runs read account records from the staging tree and use host shadow-utils with a prefix, because BusyBox applets do not support operating on a separate staged root. UID allocation is left to the system account utility rather than a package-manager UID range.
 

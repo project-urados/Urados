@@ -346,6 +346,8 @@ static int verify_certificate_package(const char *zip_path, const char *roots_di
         goto out;
     if (pkg_meta_verify(mf, mflen, sf, sflen, digs, nd, err, errlen) != 0)
         goto out;
+    if (pkg_signer_fingerprint(cert_chain, cert_chain_len, v->signer, err, errlen) != 0)
+        goto out;
 
     /* Every file is authenticated now, so the manifest can be parsed. */
     if (pkg_manifest_parse(mbuf, mlen, &v->manifest, err, errlen) != 0)

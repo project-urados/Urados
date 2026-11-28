@@ -5,7 +5,9 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
@@ -163,9 +165,53 @@ static int self_check(int argc, char **argv)
     return ok ? 0 : 1;
 }
 
+/*
+ * --hold SECONDS [--ignore-term] [--spawn]
+ * Keeps running for SECONDS so the stop/update/uninstall tests can act on a live
+ * app. --ignore-term makes SIGTERM ignored, so only SIGKILL stops it. --spawn
+ * starts a detached child in its own session that runs the same hold, so the
+ * tests can check that stop reaches every process of the app.
+ */
+static int hold(int seconds, int ignore_term, int spawn)
+{
+    if (ignore_term)
+        signal(SIGTERM, SIG_IGN);
+    printf("hold=started pid=%ld\n", (long)getpid());
+    fflush(stdout);
+    if (spawn) {
+        pid_t child = fork();
+
+        if (child < 0)
+            return 1;
+        if (child == 0) {
+            setsid();
+            if (ignore_term)
+                signal(SIGTERM, SIG_IGN);
+            sleep((unsigned)seconds);
+            _exit(0);
+        }
+        printf("spawned=%ld\n", (long)child);
+        fflush(stdout);
+    }
+    sleep((unsigned)seconds);
+    printf("hold=finished\n");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 4 && strcmp(argv[1], "--op") == 0)
         return one_op(argv[2], argv[3]);
+    if (argc >= 3 && strcmp(argv[1], "--hold") == 0) {
+        int ignore_term = 0, spawn = 0, i;
+
+        for (i = 3; i < argc; i++) {
+            if (strcmp(argv[i], "--ignore-term") == 0)
+                ignore_term = 1;
+            else if (strcmp(argv[i], "--spawn") == 0)
+                spawn = 1;
+        }
+        return hold(atoi(argv[2]), ignore_term, spawn);
+    }
     return self_check(argc, argv);
 }

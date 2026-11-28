@@ -111,6 +111,7 @@ typedef struct {
     pkg_manifest manifest;
     pkg_digest *digests; /* sorted; includes manifest.xml and signer chain, excludes META-INF/ */
     size_t ndigests;
+    char signer[65];     /* SHA-256 of the DER leaf signer certificate */
 } pkg_verified;
 
 /* Options shared by the urpkg commands. */
@@ -119,12 +120,19 @@ typedef struct {
     const char *keys_dir;  /* PEM-encoded trusted X.509 CA certificates */
 } pkg_opts;
 
+/* Options for the commands that stop a running app (stop, update, uninstall). */
+typedef struct {
+    int force;             /* send SIGKILL at once instead of SIGTERM first */
+    int timeout_ms;        /* grace period after SIGTERM before SIGKILL */
+} pkg_stop_opts;
+
 /* common.c */
 void pkg_seterr(char *err, size_t errlen, const char *fmt, ...)
     __attribute__((format(printf, 3, 4)));
 int  pkg_name_valid(const char *name);
 int  pkg_version_valid(const char *v);
 int  pkg_path_safe(const char *p);
+int  pkg_version_compare(const char *a, const char *b);
 int  pkg_entry_zipname(const char *entry, char *out, size_t outlen);
 int  pkg_digest_cmp(const void *a, const void *b);
 void pkg_hex_encode(const unsigned char *md, size_t len, char hex[65]);
@@ -150,6 +158,8 @@ int  pkg_verify_certificate_signature(const unsigned char *chain, size_t chainle
                                       char *err, size_t errlen);
 int  pkg_create_csr(const char *keypath, const char *csrpath,
                     const pkg_cert_subject *subject, char *err, size_t errlen);
+int  pkg_signer_fingerprint(const unsigned char *chain, size_t chainlen, char hex[65],
+                            char *err, size_t errlen);
 
 /* meta_files.c (APK/JAR-style MANIFEST.MF and CERT.SF, SHA-256 only) */
 int  pkg_meta_build(const pkg_digest *d, size_t n, unsigned char **mf, size_t *mflen,
@@ -190,5 +200,8 @@ int  pkg_pack(const char *dir, const char *out_zip, EVP_PKEY *key,
 int  pkg_cmd_install(const char *source, const pkg_opts *o);
 int  pkg_cmd_start(const char *name, int argc, char **argv, const pkg_opts *o);
 int  pkg_cmd_verify(const char *zip, const pkg_opts *o);
+int  pkg_cmd_update(const char *source, const pkg_stop_opts *so, const pkg_opts *o);
+int  pkg_cmd_stop(const char *name, const pkg_stop_opts *so, const pkg_opts *o);
+int  pkg_cmd_uninstall(const char *name, const pkg_stop_opts *so, const pkg_opts *o);
 
 #endif

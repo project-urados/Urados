@@ -7,7 +7,7 @@ The creators of Urados also offer selected parts of the operating system as open
 It provides two system components and three primary binaries:
 
 - `urdev` creates an app project, validates its manifest, generates signing material or a CSR, and builds a signed package.
-- `urpkg` verifies, installs, and starts signed packages on a device.
+- `urpkg` verifies, installs, starts, stops, updates and uninstalls signed packages on a device.
 - `uinit` is the native init system. It can run as PID 1 or validate and boot a staged root during development.
 
 At runtime, each app gets its own Unix UID and a folder named after the app. Mode bits and UID-owned data homes isolate each app's runtime and persistent data by default. App names are restricted to `[a-z_][a-z0-9_-]*` (at most 32 bytes) so they are safe as both user names and ext4 file and folder names.

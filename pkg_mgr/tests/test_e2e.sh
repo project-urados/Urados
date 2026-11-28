@@ -251,6 +251,178 @@ expect_eq "cross-app runtime write was denied by per-app DAC" "1" "$(grep -c 'de
 expect_eq "cross-app runtime marker was not created" "no" \
     "$(sudo -n test -e "$ROOT/run/app/notes/cross-app-marker" && echo yes || echo no)"
 
+echo "== stop, update and uninstall"
+
+# A probe started with --hold keeps running until it is stopped. pid_alive
+# treats zombies as gone. Background starts go through sudo, so $! is the
+# sudo process, and wait reaps it once the app has stopped.
+pid_alive() { [ -d "/proc/$1" ] && ! grep -q '^State:[[:space:]]*Z' "/proc/$1/status" 2>/dev/null; }
+wait_log() { # wait_log FILE PATTERN: up to 10 seconds for PATTERN to appear
+    i=0
+    while ! grep -q "$2" "$1" 2>/dev/null; do
+        i=$((i + 1))
+        [ "$i" -gt 100 ] && return 1
+        sleep 0.1
+    done
+}
+hold_pid() { sed -n 's/^hold=started pid=//p' "$1" | head -n 1; }
+spawned_pid() { sed -n 's/^spawned=//p' "$1" | head -n 1; }
+yesno() { if "$@"; then echo yes; else echo no; fi; }
+start_hold() { # start_hold NAME LOG ARGS...: start an app in the background
+    name=$1; log=$2; shift 2
+    sudo -n "$URPKG" --root "$ROOT" start "$name" "$@" >"$log" 2>&1 &
+}
+mkver() { # mkver SRC DST VERSION: copy a project and set its manifest version
+    rm -rf "$2" && cp -r "$1" "$2" && sed -i "s#<version>[^<]*</version>#<version>$3</version>#" "$2/manifest.xml"
+}
+stat_path() { sudo -n test -e "$1" && echo yes || echo no; }
+installed_version() { sudo -n "$URPKG" --root "$ROOT" verify "$ROOT/data/app_progs/$1.zip" | sed -n 1p | cut -d, -f1; }
+
+echo "  -- stop"
+expect_eq "stop reports an app that is not running" "notes is not running" \
+    "$(sudo -n "$URPKG" --root "$ROOT" stop notes 2>/dev/null)"
+expect_fail "stop refuses an app that was never installed" sudo -n "$URPKG" --root "$ROOT" stop nosuchapp
+expect_fail "stop refuses an invalid app name" sudo -n "$URPKG" --root "$ROOT" stop "Bad.Name"
+expect_fail "stop refuses a timeout above the maximum" sudo -n "$URPKG" --root "$ROOT" stop --timeout 601 notes
+expect_fail "stop refuses a non-numeric timeout" sudo -n "$URPKG" --root "$ROOT" stop --timeout soon notes
+
+start_hold notes "$T/hold-term.log" --hold 120; H1=$!
+expect_ok "a long-running app is started in the background" wait_log "$T/hold-term.log" "hold=started"
+P1=$(hold_pid "$T/hold-term.log")
+expect_ok "stop terminates a running app" sudo -n "$URPKG" --root "$ROOT" stop --timeout 5 notes
+wait "$H1" 2>/dev/null || true
+expect_eq "stopped app process is gone" "no" "$(yesno pid_alive "$P1")"
+expect_eq "SIGTERM ended the app before it finished" "0" "$(grep -c 'hold=finished' "$T/hold-term.log" || true)"
+expect_eq "stop releases the app lock for the next start" "yes" \
+    "$(sudo -n "$URPKG" --root "$ROOT" stop notes >/dev/null 2>&1 && echo yes || echo no)"
+
+start_hold notes "$T/hold-tree.log" --hold 120 --spawn; H2=$!
+expect_ok "an app with a detached child is running" wait_log "$T/hold-tree.log" "spawned="
+P2=$(hold_pid "$T/hold-tree.log")
+C2=$(spawned_pid "$T/hold-tree.log")
+expect_ok "stop reaches every process of the app" sudo -n "$URPKG" --root "$ROOT" stop --timeout 5 notes
+wait "$H2" 2>/dev/null || true
+expect_eq "the app's main process is gone" "no" "$(yesno pid_alive "$P2")"
+expect_eq "the detached child in its own session is gone" "no" "$(yesno pid_alive "$C2")"
+
+start_hold notes "$T/hold-kill.log" --hold 120 --ignore-term; H3=$!
+expect_ok "an app that ignores SIGTERM is running" wait_log "$T/hold-kill.log" "hold=started"
+P3=$(hold_pid "$T/hold-kill.log")
+expect_ok "stop escalates to SIGKILL after the grace period" sudo -n "$URPKG" --root "$ROOT" stop --timeout 1 notes
+wait "$H3" 2>/dev/null || true
+expect_eq "SIGKILL ended the app that ignored SIGTERM" "no" "$(yesno pid_alive "$P3")"
+
+start_hold notes "$T/hold-force.log" --hold 120 --ignore-term; H4=$!
+expect_ok "an app that ignores SIGTERM is running again" wait_log "$T/hold-force.log" "hold=started"
+P4=$(hold_pid "$T/hold-force.log")
+FSTART=$(date +%s)
+expect_ok "stop --force kills at once" sudo -n "$URPKG" --root "$ROOT" stop --force --timeout 600 notes
+FEND=$(date +%s)
+wait "$H4" 2>/dev/null || true
+expect_eq "--force does not wait for the grace period" "yes" "$([ $((FEND - FSTART)) -lt 20 ] && echo yes || echo no)"
+expect_eq "forced app process is gone" "no" "$(yesno pid_alive "$P4")"
+
+echo "  -- update"
+mkver "$T/notes" "$T/v09" 0.9.0
+mkver "$T/notes" "$T/v11" 1.1.0
+mkver "$T/notes" "$T/v12" 1.2.0
+"$URDEV" pack "$T/v09" "$T/notes-0.9.0.zip" --key "$T/company.key" --cert "$T/company-chain.pem" >/dev/null
+"$URDEV" pack "$T/v11" "$T/notes-1.1.0.zip" --key "$T/company.key" --cert "$T/company-chain.pem" >/dev/null
+"$URDEV" pack "$T/v12" "$T/notes-1.2.0.zip" --key "$T/company.key" --cert "$T/company-chain.pem" >/dev/null
+"$URDEV" pack "$T/v11" "$T/notes-rogue.zip" --key "$T/rogue.pem" --cert "$T/rogue-chain.pem" >/dev/null
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$T/pub2.key" >/dev/null 2>&1
+"$URDEV" csr "$T/pub2.key" "$T/pub2.csr" "Second Publisher" >/dev/null
+openssl x509 -req -in "$T/pub2.csr" -CA "$T/root.crt" -CAkey "$T/root.key" \
+    -CAcreateserial -out "$T/pub2.crt" -days 365 -sha256 -extfile "$T/codesign.ext" >/dev/null 2>&1
+cp "$T/pub2.crt" "$T/pub2-chain.pem"
+"$URDEV" pack "$T/v12" "$T/notes-1.2.0-otherkey.zip" --key "$T/pub2.key" --cert "$T/pub2-chain.pem" >/dev/null
+rm -rf "$T/ghost" && "$URDEV" init "$T/ghost" ghost 1.0.0 >/dev/null
+cp "$T/probe" "$T/ghost/app/ghost"
+"$URDEV" pack "$T/ghost" "$T/ghost-1.0.0.zip" --key "$T/company.key" --cert "$T/company-chain.pem" >/dev/null
+
+start_hold notes "$T/hold-up.log" --hold 120; HU=$!
+expect_ok "the app is running before the update attempts" wait_log "$T/hold-up.log" "hold=started"
+PU=$(hold_pid "$T/hold-up.log")
+expect_fail "update refuses a downgrade" sudo -n "$URPKG" --root "$ROOT" update "$T/notes-0.9.0.zip"
+expect_fail "update refuses the installed version" sudo -n "$URPKG" --root "$ROOT" update "$T/notes-1.0.0.zip"
+expect_fail "update refuses a package signed by another publisher key" \
+    sudo -n "$URPKG" --root "$ROOT" update "$T/notes-1.2.0-otherkey.zip"
+expect_fail "update refuses an untrusted package" sudo -n "$URPKG" --root "$ROOT" update "$T/notes-rogue.zip"
+expect_fail "update refuses a package for an app that is not installed" \
+    sudo -n "$URPKG" --root "$ROOT" update "$T/ghost-1.0.0.zip"
+expect_fail "update refuses a missing package" sudo -n "$URPKG" --root "$ROOT" update "$T/no-such.zip"
+expect_eq "refused updates leave the running app running" "yes" "$(yesno pid_alive "$PU")"
+expect_eq "refused updates keep the installed version" "OK notes 1.0.0" "$(installed_version notes)"
+expect_eq "refused updates leave no staged package behind" "0" \
+    "$(sudo -n ls -A "$ROOT/data/app_progs/.staging" | wc -l)"
+
+expect_ok "update replaces the app with a newer signed version and stops it" \
+    sudo -n "$URPKG" --root "$ROOT" update --timeout 2 "$T/notes-1.1.0.zip"
+wait "$HU" 2>/dev/null || true
+expect_eq "updated app process was stopped" "no" "$(yesno pid_alive "$PU")"
+expect_eq "trusted copy is now the new version" "OK notes 1.1.0" "$(installed_version notes)"
+expect_eq "update removes the old runtime tree" "no" "$(stat_path "$ROOT/run/app/notes")"
+expect_eq "update keeps the app account" "1" "$(sudo -n grep -c '^notes:' "$ROOT/etc/passwd")"
+expect_eq "update keeps the app's private data" "yes" \
+    "$(stat_path "$ROOT/data/app/notes/data/probe-data.txt")"
+expect_eq "update keeps the trusted copy root:root 0600" "0:0 600" "$(stat_of "$ROOT/data/app_progs/notes.zip")"
+expect_eq "update leaves no staging files" "0" "$(sudo -n ls -A "$ROOT/data/app_progs/.staging" | wc -l)"
+expect_ok "the updated app starts" sudo -n "$URPKG" --root "$ROOT" start notes
+expect_eq "the updated payload passes its self-check" "1" "$(grep -c '^probe=PASS' "$T/last.log")"
+
+PORT=18081
+python3 -m http.server "$PORT" --bind 127.0.0.1 --directory "$T" >"$T/http.log" 2>&1 &
+HTTP_PID=$!
+i=0
+until curl -fsS "http://127.0.0.1:$PORT/notes-1.2.0.zip" -o /dev/null 2>/dev/null; do
+    i=$((i + 1))
+    [ "$i" -gt 100 ] && break
+    sleep 0.1
+done
+start_hold notes "$T/hold-http.log" --hold 120; HH=$!
+expect_ok "the app is running before the HTTP update" wait_log "$T/hold-http.log" "hold=started"
+PH=$(hold_pid "$T/hold-http.log")
+expect_ok "update fetches a newer package over HTTP and stops the running app" \
+    sudo -n "$URPKG" --root "$ROOT" update "http://127.0.0.1:$PORT/notes-1.2.0.zip"
+wait "$HH" 2>/dev/null || true
+expect_eq "HTTP-updated app process was stopped" "no" "$(yesno pid_alive "$PH")"
+expect_eq "trusted copy is now 1.2.0 after the HTTP update" "OK notes 1.2.0" "$(installed_version notes)"
+kill "$HTTP_PID" 2>/dev/null || true
+wait "$HTTP_PID" 2>/dev/null || true
+
+echo "  -- uninstall"
+start_hold other "$T/hold-other.log" --hold 120; HO=$!
+expect_ok "the app to uninstall is running" wait_log "$T/hold-other.log" "hold=started"
+PO=$(hold_pid "$T/hold-other.log")
+expect_ok "uninstall stops a running app and removes it" \
+    sudo -n "$URPKG" --root "$ROOT" uninstall --timeout 2 other
+wait "$HO" 2>/dev/null || true
+expect_eq "uninstalled app process is gone" "no" "$(yesno pid_alive "$PO")"
+expect_eq "uninstall removes the app account" "0" "$(sudo -n grep -c '^other:' "$ROOT/etc/passwd" || true)"
+expect_eq "uninstall removes the app data home" "no" "$(stat_path "$ROOT/data/app/other")"
+expect_eq "uninstall removes the trusted package" "no" "$(stat_path "$ROOT/data/app_progs/other.zip")"
+expect_eq "uninstall removes the runtime tree" "no" "$(stat_path "$ROOT/run/app/other")"
+expect_eq "uninstall removes the app lock file" "no" "$(stat_path "$ROOT/data/app_progs/.locks/app-other.lock")"
+expect_eq "uninstall keeps other apps" "1" "$(sudo -n grep -c '^notes:' "$ROOT/etc/passwd")"
+expect_fail "uninstalling an app twice reports it is not installed" \
+    sudo -n "$URPKG" --root "$ROOT" uninstall other
+expect_ok "a fully uninstalled app can be installed again" sudo -n "$URPKG" --root "$ROOT" install "$T/other-1.0.0.zip"
+expect_ok "simulate an earlier partial uninstall that removed only the account" \
+    sudo -n userdel -P "$ROOT" other
+expect_ok "uninstall completes a partial earlier removal" sudo -n "$URPKG" --root "$ROOT" uninstall other
+expect_eq "completed partial removal leaves no trusted package" "no" \
+    "$(stat_path "$ROOT/data/app_progs/other.zip")"
+
+start_hold notes "$T/hold-final.log" --hold 120 --ignore-term; HF=$!
+expect_ok "an app that ignores SIGTERM is running for uninstall" wait_log "$T/hold-final.log" "hold=started"
+PF=$(hold_pid "$T/hold-final.log")
+expect_ok "uninstall kills an app that ignores SIGTERM after the grace period" \
+    sudo -n "$URPKG" --root "$ROOT" uninstall --timeout 1 notes
+wait "$HF" 2>/dev/null || true
+expect_eq "uninstall killed the app that ignored SIGTERM" "no" "$(yesno pid_alive "$PF")"
+expect_eq "notes account is removed by uninstall" "0" "$(sudo -n grep -c '^notes:' "$ROOT/etc/passwd" || true)"
+expect_eq "notes runtime tree is removed by uninstall" "no" "$(stat_path "$ROOT/run/app/notes")"
+
 echo
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]

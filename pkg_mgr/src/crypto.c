@@ -338,6 +338,37 @@ out:
     sk_X509_pop_free(untrusted, X509_free);
     return rc;
 }
+/*
+ * SHA-256 of the DER SubjectPublicKeyInfo of the leaf signer. This identifies
+ * the publisher key, so a renewed certificate for the same key keeps the same
+ * identity, while a package signed with a different key does not.
+ */
+int pkg_signer_fingerprint(const unsigned char *chain, size_t chainlen, char hex[65],
+                           char *err, size_t errlen)
+{
+    X509 *leaf = NULL;
+    STACK_OF(X509) *untrusted = NULL;
+    EVP_PKEY *pub;
+    unsigned char *der = NULL;
+    int len, rc = -1;
+
+    if (parse_signer_chain(chain, chainlen, &leaf, &untrusted, err, errlen) != 0)
+        return -1;
+    pub = X509_get0_pubkey(leaf);
+    len = pub ? i2d_PUBKEY(pub, &der) : -1;
+    if (len <= 0) {
+        pkg_seterr(err, errlen, "cannot encode the signer public key");
+        goto out;
+    }
+    pkg_sha256(der, (size_t)len, hex);
+    rc = 0;
+out:
+    OPENSSL_free(der);
+    X509_free(leaf);
+    sk_X509_pop_free(untrusted, X509_free);
+    return rc;
+}
+
 static int is_suffix(const char *name, const char *suffix)
 {
     size_t n = strlen(name), s = strlen(suffix);

@@ -1,10 +1,13 @@
 /*
- * install.c - urpkg commands: install, start, verify.
+ * install.c - urpkg commands: install, start, verify, stop, update, uninstall.
  *
- * install  Verify a certificate-signed package, create its app identity and
- *          private data home, and store the trusted archive.
- * start    Verify the root-owned package copy, extract it under /run/app and run it.
- * verify   Check a package file against trusted X.509 CA certificates.
+ * install    Verify a certificate-signed package, create its app identity and
+ *            private data home, and store the trusted archive.
+ * start      Verify the root-owned package copy, extract it under /run/app and run it.
+ * verify     Check a package file against trusted X.509 CA certificates.
+ * stop       Terminate every process the app is running, escalating to SIGKILL.
+ * update     Replace an installed app with a newer package from the same publisher.
+ * uninstall  Stop the app, then remove its account, runtime, package and data.
  *
  * start verifies /data/app_progs/<name>.zip, then extracts a new runtime tree
  * under /run/app/<name> and executes its verified manifest entry. Persistent
@@ -12,11 +15,18 @@
  *
  * Failed installs are rolled back: the account, trusted copy and protected app
  * tree are removed, so a failed install leaves no partial installation.
+ *
+ * Stopping: `start` holds the per-app lock while its app runs. stop, update and
+ * uninstall therefore signal the app first and then take the lock, which is
+ * only granted once no process of the app UID remains in the target root.
  */
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <grp.h>
+#include <limits.h>
 #include <linux/fs.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,6 +36,7 @@
 #include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "urados_pkg.h"
@@ -167,8 +178,8 @@ static int open_runtime_root(const pkg_opts *o)
     return app_fd;
 }
 
-/* Opens and exclusively locks the root-only lock file for one app name. */
-static int lock_app_at(int locks_fd, const char *name, int setup_permissions)
+/* Opens the root-only lock file for one app name and applies lock_op (flock). */
+static int open_app_lock(int locks_fd, const char *name, int setup_permissions, int lock_op)
 {
     char lock_name[PKG_NAME_MAX + 16];
     struct stat st;
@@ -207,7 +218,7 @@ static int lock_app_at(int locks_fd, const char *name, int setup_permissions)
         errno = EPERM;
         return -1;
     }
-    if (flock(fd, LOCK_EX) != 0) {
+    if (flock(fd, lock_op) != 0) {
         int saved = errno;
         close(fd);
         errno = saved;
@@ -225,6 +236,12 @@ static int lock_app_at(int locks_fd, const char *name, int setup_permissions)
         return -1;
     }
     return fd;
+}
+
+/* Opens and exclusively (blocking) locks the per-app lock file. */
+static int lock_app_at(int locks_fd, const char *name, int setup_permissions)
+{
+    return open_app_lock(locks_fd, name, setup_permissions, LOCK_EX);
 }
 
 /* Creates a randomized sibling directory for a fully verified runtime extract. */
@@ -783,5 +800,557 @@ out:
     if (progs_fd >= 0) close(progs_fd);
     if (data_fd >= 0) close(data_fd);
     pkg_verified_free(&v);
+    return rc;
+}
+
+/* ------------------------------------------------------------------------ */
+/* stop, update and uninstall                                               */
+/* ------------------------------------------------------------------------ */
+
+#define STOP_POLL_US       50000 /* poll interval while waiting for processes to exit */
+#define STOP_HARD_EXTRA_MS 10000 /* extra wait past the grace period, for SIGKILL */
+
+static long long now_ms(void)
+{
+    struct timespec ts;
+
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/*
+ * 1 when the app account exists (uid is stored), 0 when it does not, -1 when
+ * the name maps to uid 0. Root is never an app, so stop and uninstall must not
+ * ever signal root's processes.
+ */
+static int find_app_uid(const pkg_opts *o, const char *name, uid_t *uid)
+{
+    gid_t gid = 0;
+
+    if (pkg_lookup_passwd(o->root, name, uid, &gid) != 0)
+        return 0;
+    if (*uid == 0) {
+        msg_err("'%s' maps to uid 0 and is not an app account", name);
+        return -1;
+    }
+    return 1;
+}
+
+/*
+ * True when pid runs with the app's real UID, is not a zombie, and lives inside
+ * the target root. The UID test keeps signals on this app's processes only; the
+ * root test keeps staged runs from touching processes of other roots.
+ */
+static int proc_is_app_process(pid_t pid, uid_t uid, const struct stat *rootst)
+{
+    char path[64], line[256];
+    unsigned long ruid = 0;
+    int have_uid = 0;
+    char state = '?';
+    struct stat st;
+    FILE *f;
+
+    if (uid == (uid_t)-1)
+        return 0;
+    snprintf(path, sizeof(path), "/proc/%ld/status", (long)pid);
+    f = fopen(path, "r");
+    if (!f)
+        return 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "Uid:", 4) == 0) {
+            ruid = strtoul(line + 4, NULL, 10);
+            have_uid = 1;
+        } else if (strncmp(line, "State:", 6) == 0) {
+            const char *p = line + 6;
+
+            while (*p == ' ' || *p == '\t')
+                p++;
+            state = *p;
+        }
+    }
+    fclose(f);
+    if (!have_uid || ruid != (unsigned long)uid || state == 'Z' || state == 'X')
+        return 0;
+    snprintf(path, sizeof(path), "/proc/%ld/root", (long)pid);
+    if (stat(path, &st) != 0)
+        return 0;
+    return st.st_dev == rootst->st_dev && st.st_ino == rootst->st_ino;
+}
+
+/*
+ * Sends sig to every app process in the target root (sig 0 only counts them).
+ * *count, when given, receives the number of live app processes seen.
+ */
+static int signal_app_processes(const pkg_opts *o, uid_t uid, int sig, int *count)
+{
+    struct stat rootst;
+    DIR *d;
+    struct dirent *e;
+    pid_t self = getpid();
+    int n = 0, failed = 0;
+
+    if (stat(o->root[0] != '\0' ? o->root : "/", &rootst) != 0)
+        return -1;
+    d = opendir("/proc");
+    if (!d)
+        return -1;
+    while ((e = readdir(d)) != NULL) {
+        unsigned long v;
+        char *end = NULL;
+        pid_t pid;
+
+        if (e->d_name[0] < '1' || e->d_name[0] > '9')
+            continue;
+        errno = 0;
+        v = strtoul(e->d_name, &end, 10);
+        if (errno != 0 || *end != '\0' || v > INT_MAX)
+            continue;
+        pid = (pid_t)v;
+        if (pid == self || !proc_is_app_process(pid, uid, &rootst))
+            continue;
+        n++;
+        if (sig > 0 && kill(pid, sig) != 0 && errno != ESRCH)
+            failed = 1;
+    }
+    closedir(d);
+    if (count)
+        *count = n;
+    return failed ? -1 : 0;
+}
+
+/*
+ * Stops every process of an app and holds its per-app lock while none remain.
+ *
+ * `start` keeps the lock for as long as its app runs, so the lock can only be
+ * taken after the app and every process it left behind have gone. Each round:
+ * try the lock without blocking, count the app's processes, send SIGTERM once,
+ * and send SIGKILL after the grace period (or at once with force). On success
+ * *lock_fd is the held lock, or -1 when the app has no lock file.
+ */
+static int stop_app(const pkg_opts *o, const pkg_stop_opts *so, const char *name,
+                    uid_t uid, int locks_fd, int *lock_fd, int *running)
+{
+    long long start = now_ms(), term_at = 0;
+    int term_sent = 0, lock_missing = 0, count = 0;
+
+    *lock_fd = -1;
+    *running = 0;
+    if (locks_fd < 0)
+        lock_missing = 1;
+    for (;;) {
+        long long now = now_ms();
+
+        if (*lock_fd < 0 && !lock_missing) {
+            int fd = open_app_lock(locks_fd, name, 0, LOCK_EX | LOCK_NB);
+
+            if (fd >= 0)
+                *lock_fd = fd;
+            else if (errno == ENOENT)
+                lock_missing = 1;
+            else if (errno != EWOULDBLOCK) {
+                msg_err("cannot lock app '%s': %s", name, strerror(errno));
+                break;
+            }
+        }
+        if (signal_app_processes(o, uid, 0, &count) != 0) {
+            msg_err("cannot list the processes of '%s'", name);
+            break;
+        }
+        if (count > 0)
+            *running = 1;
+        if (count == 0 && (*lock_fd >= 0 || lock_missing))
+            return 0;
+        if (count > 0) {
+            if (so->force || (term_sent && now - term_at >= so->timeout_ms)) {
+                if (signal_app_processes(o, uid, SIGKILL, NULL) != 0) {
+                    msg_err("cannot signal the processes of '%s'", name);
+                    break;
+                }
+            } else if (!term_sent) {
+                if (signal_app_processes(o, uid, SIGTERM, NULL) != 0) {
+                    msg_err("cannot signal the processes of '%s'", name);
+                    break;
+                }
+                term_sent = 1;
+                term_at = now;
+            }
+        }
+        if (now - start > (long long)so->timeout_ms + STOP_HARD_EXTRA_MS) {
+            if (count == 0)
+                msg_err("'%s' is busy: another urpkg operation holds its lock", name);
+            else
+                msg_err("'%s' did not stop: %d process(es) remain", name, count);
+            break;
+        }
+        usleep(STOP_POLL_US);
+    }
+    if (*lock_fd >= 0) {
+        close(*lock_fd);
+        *lock_fd = -1;
+    }
+    return -1;
+}
+
+/* Opens base/name as a directory owned by owner. *fd is -1 when it is absent. */
+static int open_optional_owned_at(int base, const char *name, uid_t owner, int *fd)
+{
+    struct stat st;
+    int f;
+
+    *fd = -1;
+    f = open_dir_at(base, name);
+    if (f < 0)
+        return errno == ENOENT ? 0 : -1;
+    if (fstat(f, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != owner) {
+        close(f);
+        errno = EPERM;
+        return -1;
+    }
+    *fd = f;
+    return 0;
+}
+
+/*
+ * Verifies the installed archive through a descriptor pinned to the root-only
+ * file, exactly as start does, so the result describes the file start would run.
+ */
+static int verify_installed(int progs_fd, const char *archive_name, const pkg_opts *o,
+                            pkg_verified *v, char *err, size_t errlen)
+{
+    char fdpath[64];
+    struct stat st;
+    int zfd, rc;
+
+    zfd = openat(progs_fd, archive_name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (zfd < 0) {
+        pkg_seterr(err, errlen, "trusted package %s is missing", archive_name);
+        return -1;
+    }
+    if (fstat(zfd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_uid != 0 || st.st_gid != 0 ||
+        (st.st_mode & 07777) != 0600) {
+        close(zfd);
+        pkg_seterr(err, errlen, "trusted package %s has unsafe ownership or permissions",
+                   archive_name);
+        return -1;
+    }
+    snprintf(fdpath, sizeof(fdpath), "/proc/self/fd/%d", zfd);
+    rc = pkg_verify(fdpath, o->keys_dir, v, err, errlen);
+    close(zfd);
+    return rc;
+}
+
+/*
+ * An update must be a newer version of the same app, signed by the same publisher
+ * key. Downgrades are refused, so an old signed release cannot replace a newer one.
+ */
+static int check_upgrade(const pkg_verified *old, const pkg_verified *nw, char *err, size_t errlen)
+{
+    int cmp;
+
+    if (strcmp(old->manifest.name, nw->manifest.name) != 0) {
+        pkg_seterr(err, errlen, "package is for '%s', not the installed app '%s'",
+                   nw->manifest.name, old->manifest.name);
+        return -1;
+    }
+    if (strcmp(old->signer, nw->signer) != 0) {
+        pkg_seterr(err, errlen, "package is signed by a different publisher key than the installed version");
+        return -1;
+    }
+    cmp = pkg_version_compare(nw->manifest.version, old->manifest.version);
+    if (cmp == 0) {
+        pkg_seterr(err, errlen, "version %s is already installed", old->manifest.version);
+        return -1;
+    }
+    if (cmp < 0) {
+        pkg_seterr(err, errlen, "version %s is older than installed %s; downgrades are refused",
+                   nw->manifest.version, old->manifest.version);
+        return -1;
+    }
+    return 0;
+}
+
+/* Removes /run/app/<name>. An absent /run/app or payload is not an error. */
+static int remove_runtime(const pkg_opts *o, const char *name)
+{
+    char p[PKG_PATH_MAX];
+    struct stat st;
+    int runtime_fd, rc;
+
+    rooted(p, sizeof(p), o, PKG_RUN_DIR);
+    if (lstat(p, &st) != 0)
+        return errno == ENOENT ? 0 : -1;
+    runtime_fd = open_runtime_root(o);
+    if (runtime_fd < 0)
+        return -1;
+    rc = pkg_rm_entry_at(runtime_fd, name, 0);
+    close(runtime_fd);
+    return rc;
+}
+
+/* Deletes the app account. Staged roots use userdel, the device uses deluser. */
+static int delete_account(const pkg_opts *o, const char *name)
+{
+    const char *a[] = { name };
+
+    if (o->root[0] != '\0')
+        return run_stage_acct(o, "userdel", a, 1) == 0 ? 0 : -1;
+    return run_busybox_acct("deluser", a, 1) == 0 ? 0 : -1;
+}
+
+/* Opens the app's package store, lock and staging directories. Returns 0 or -1. */
+static int open_store(const pkg_opts *o, int *data_fd, int *progs_fd, int *locks_fd, int *stage_fd)
+{
+    *data_fd = open_data_root(o, 0);
+    if (*data_fd < 0)
+        return -1;
+    *progs_fd = open_owned_at(*data_fd, "app_progs", 0);
+    if (*progs_fd < 0)
+        return -1;
+    *locks_fd = open_owned_at(*progs_fd, LOCKS_DIR, 0);
+    *stage_fd = open_owned_at(*progs_fd, PKG_STAGING_DIR, 0);
+    return (*locks_fd < 0 || *stage_fd < 0) ? -1 : 0;
+}
+
+int pkg_cmd_stop(const char *name, const pkg_stop_opts *so, const pkg_opts *o)
+{
+    uid_t uid = (uid_t)-1;
+    int data_fd = -1, progs_fd = -1, locks_fd = -1, stage_fd = -1, lock_fd = -1;
+    int running = 0, rc = 1, r;
+
+    if (require_root() != 0)
+        return 1;
+    if (!pkg_name_valid(name)) {
+        msg_err("invalid package name '%s'", name);
+        return 1;
+    }
+    r = find_app_uid(o, name, &uid);
+    if (r <= 0) {
+        if (r == 0)
+            msg_err("no app user '%s': the app is not installed", name);
+        return 1;
+    }
+    if (open_store(o, &data_fd, &progs_fd, &locks_fd, &stage_fd) != 0) {
+        msg_err("the package store is missing or unsafe: %s", strerror(errno));
+        goto out;
+    }
+    if (stop_app(o, so, name, uid, locks_fd, &lock_fd, &running) != 0)
+        goto out;
+    if (running)
+        printf("stopped %s\n", name);
+    else
+        printf("%s is not running\n", name);
+    rc = 0;
+
+out:
+    if (lock_fd >= 0) close(lock_fd);
+    if (stage_fd >= 0) close(stage_fd);
+    if (locks_fd >= 0) close(locks_fd);
+    if (progs_fd >= 0) close(progs_fd);
+    if (data_fd >= 0) close(data_fd);
+    return rc;
+}
+
+int pkg_cmd_update(const char *source, const pkg_stop_opts *so, const pkg_opts *o)
+{
+    char err[512] = "";
+    char progs_path[PKG_PATH_MAX];
+    char stage_tmpl[PKG_PATH_MAX * 2];
+    char archive_name[PKG_NAME_MAX + sizeof(PKG_ARCHIVE_SUFFIX)];
+    char lock_name[PKG_NAME_MAX + 16];
+    char name[PKG_NAME_MAX + 1] = "";
+    const char *stage_name = NULL;
+    pkg_verified nv, ov;
+    struct stat st;
+    uid_t uid = (uid_t)-1;
+    int data_fd = -1, progs_fd = -1, locks_fd = -1, stage_fd = -1, lock_fd = -1;
+    int staged = 0, running = 0, tfd, r, rc = 1;
+
+    memset(&nv, 0, sizeof(nv));
+    memset(&ov, 0, sizeof(ov));
+    if (require_root() != 0)
+        return 1;
+
+    rooted(progs_path, sizeof(progs_path), o, PKG_PROGS_DIR);
+    if (open_store(o, &data_fd, &progs_fd, &locks_fd, &stage_fd) != 0) {
+        msg_err("the package store is missing or unsafe; reinstall the app: %s", strerror(errno));
+        goto out;
+    }
+
+    /* 1. Fetch and verify the new package before anything is stopped. */
+    snprintf(stage_tmpl, sizeof(stage_tmpl), "%s/%s/incoming-XXXXXX", progs_path, PKG_STAGING_DIR);
+    tfd = mkstemp(stage_tmpl);
+    if (tfd < 0) {
+        msg_err("cannot create a staging file: %s", strerror(errno));
+        goto out;
+    }
+    staged = 1;
+    stage_name = strrchr(stage_tmpl, '/') + 1;
+    if (pkg_fetch(source, tfd, PKG_ARCHIVE_MAX, err, sizeof(err)) != 0 || fsync(tfd) != 0) {
+        msg_err("%s", err[0] ? err : "cannot store the package");
+        close(tfd);
+        goto out;
+    }
+    close(tfd);
+    if (pkg_verify(stage_tmpl, o->keys_dir, &nv, err, sizeof(err)) != 0) {
+        msg_err("%s", err);
+        goto out;
+    }
+    snprintf(name, sizeof(name), "%s", nv.manifest.name);
+    snprintf(archive_name, sizeof(archive_name), "%s%s", name, PKG_ARCHIVE_SUFFIX);
+    snprintf(lock_name, sizeof(lock_name), "app-%s.lock", name);
+
+    /* 2. Check the update against the installed package, still without stopping anything. */
+    if (verify_installed(progs_fd, archive_name, o, &ov, err, sizeof(err)) != 0) {
+        msg_err("'%s' is not installed or its package is unusable: %s", name, err);
+        goto out;
+    }
+    if (check_upgrade(&ov, &nv, err, sizeof(err)) != 0) {
+        msg_err("%s", err);
+        goto out;
+    }
+    pkg_verified_free(&ov);
+    r = find_app_uid(o, name, &uid);
+    if (r != 1) {
+        msg_err("no app user '%s': the app is not installed", name);
+        goto out;
+    }
+    if (fstatat(locks_fd, lock_name, &st, AT_SYMLINK_NOFOLLOW) != 0) {
+        msg_err("app '%s' has no lock file; reinstall it", name);
+        goto out;
+    }
+
+    /* 3. Stop the app and hold its lock. Re-check under the lock, since the installed
+     * package could have changed between steps 2 and 3. */
+    if (stop_app(o, so, name, uid, locks_fd, &lock_fd, &running) != 0)
+        goto out;
+    if (lock_fd < 0) {
+        msg_err("app '%s' has no lock file; reinstall it", name);
+        goto out;
+    }
+    if (verify_installed(progs_fd, archive_name, o, &ov, err, sizeof(err)) != 0 ||
+        check_upgrade(&ov, &nv, err, sizeof(err)) != 0) {
+        msg_err("%s", err);
+        goto out;
+    }
+
+    /* 4. Atomically replace the trusted archive. The staged file is root-only. */
+    if (renameat(stage_fd, stage_name, progs_fd, archive_name) != 0) {
+        msg_err("cannot store the new package: %s", strerror(errno));
+        goto out;
+    }
+    staged = 0;
+
+    /* 5. Drop the old runtime tree. The next start extracts the new package. */
+    if (remove_runtime(o, name) != 0)
+        fprintf(stderr, "urpkg: warning: could not remove the old runtime tree of '%s'; "
+                        "the next start replaces it\n", name);
+
+    printf("updated %s from %s to %s", name, ov.manifest.version, nv.manifest.version);
+    if (running)
+        printf(" (the running instance was stopped)");
+    printf("\nstart it with: urpkg start %s\n", name);
+    rc = 0;
+
+out:
+    if (staged && stage_fd >= 0)
+        unlinkat(stage_fd, stage_name, 0);
+    pkg_verified_free(&nv);
+    pkg_verified_free(&ov);
+    if (lock_fd >= 0) close(lock_fd);
+    if (stage_fd >= 0) close(stage_fd);
+    if (locks_fd >= 0) close(locks_fd);
+    if (progs_fd >= 0) close(progs_fd);
+    if (data_fd >= 0) close(data_fd);
+    return rc;
+}
+
+int pkg_cmd_uninstall(const char *name, const pkg_stop_opts *so, const pkg_opts *o)
+{
+    char archive_name[PKG_NAME_MAX + sizeof(PKG_ARCHIVE_SUFFIX)];
+    char lock_name[PKG_NAME_MAX + 16];
+    struct stat st;
+    uid_t uid = (uid_t)-1;
+    int data_fd = -1, progs_fd = -1, locks_fd = -1, stage_fd = -1;
+    int appdata_fd = -1, lock_fd = -1;
+    int has_acct, has_archive = 0, has_data = 0, running = 0, rc = 1, r;
+
+    if (require_root() != 0)
+        return 1;
+    if (!pkg_name_valid(name)) {
+        msg_err("invalid package name '%s'", name);
+        return 1;
+    }
+    r = find_app_uid(o, name, &uid);
+    if (r < 0)
+        return 1;
+    has_acct = r;
+    snprintf(archive_name, sizeof(archive_name), "%s%s", name, PKG_ARCHIVE_SUFFIX);
+    snprintf(lock_name, sizeof(lock_name), "app-%s.lock", name);
+
+    /* Find what is left. A partial earlier uninstall is completed by running again. */
+    data_fd = open_data_root(o, 0);
+    if (data_fd < 0) {
+        msg_err("cannot open the data directory: %s", strerror(errno));
+        goto out;
+    }
+    if (open_optional_owned_at(data_fd, "app_progs", 0, &progs_fd) != 0 ||
+        open_optional_owned_at(data_fd, "app", 0, &appdata_fd) != 0) {
+        msg_err("the package store is unsafe: %s", strerror(errno));
+        goto out;
+    }
+    if (progs_fd >= 0) {
+        if (open_optional_owned_at(progs_fd, LOCKS_DIR, 0, &locks_fd) != 0) {
+            msg_err("the per-app lock directory is unsafe: %s", strerror(errno));
+            goto out;
+        }
+        has_archive = fstatat(progs_fd, archive_name, &st, AT_SYMLINK_NOFOLLOW) == 0;
+    }
+    has_data = appdata_fd >= 0 && fstatat(appdata_fd, name, &st, AT_SYMLINK_NOFOLLOW) == 0;
+    if (!has_acct && !has_archive && !has_data) {
+        msg_err("'%s' is not installed", name);
+        goto out;
+    }
+
+    /* Stop the app first. It is only removed once no process of it remains. */
+    if (stop_app(o, so, name, uid, locks_fd, &lock_fd, &running) != 0)
+        goto out;
+
+    /* Remove in an order that keeps a failed step retryable: the account goes
+     * first, so the app cannot run again while the rest is removed. */
+    if (has_acct && delete_account(o, name) != 0) {
+        msg_err("cannot remove app user '%s'; the app is still installed", name);
+        goto out;
+    }
+    if (remove_runtime(o, name) != 0) {
+        msg_err("cannot remove the runtime tree of '%s'", name);
+        goto out;
+    }
+    if (appdata_fd >= 0 && pkg_rm_entry_at(appdata_fd, name, 0) != 0) {
+        msg_err("cannot remove the data of '%s': %s", name, strerror(errno));
+        goto out;
+    }
+    if (progs_fd >= 0 && unlinkat(progs_fd, archive_name, 0) != 0 && errno != ENOENT) {
+        msg_err("cannot remove the trusted package of '%s': %s", name, strerror(errno));
+        goto out;
+    }
+    /* The lock is held here, so no start can run while its file is removed. */
+    if (locks_fd >= 0 && lock_fd >= 0 && unlinkat(locks_fd, lock_name, 0) != 0 && errno != ENOENT) {
+        msg_err("cannot remove the lock file of '%s': %s", name, strerror(errno));
+        goto out;
+    }
+
+    printf("uninstalled %s", name);
+    if (running)
+        printf(" (the running instance was stopped)");
+    printf("\n");
+    rc = 0;
+
+out:
+    if (lock_fd >= 0) close(lock_fd);
+    if (stage_fd >= 0) close(stage_fd);
+    if (appdata_fd >= 0) close(appdata_fd);
+    if (locks_fd >= 0) close(locks_fd);
+    if (progs_fd >= 0) close(progs_fd);
+    if (data_fd >= 0) close(data_fd);
     return rc;
 }
